@@ -1,283 +1,361 @@
-name: Build Shizuku Android 17
+name: Build Shizuku Android 17 APK
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_HOME: /home/runner/android-sdk
-      ANDROID_SDK_ROOT: /home/runner/android-sdk
+    timeout-minutes: 60
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Checkout your GitHub Actions repository
-      # ------------------------------------------------------------
-
-      - name: Checkout workflow repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Find uploaded ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # ------------------------------------------------------------
-      # 2. Setup Java
-      # setup-java v5 uses Node 24
-      # ------------------------------------------------------------
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 1 \
+            -type f \
+            -iname '*.zip' \
+            | head -n 1)"
 
-      - name: Setup Java 21
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "ZIP found:"
+          echo "$ZIP_FILE"
+
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$GITHUB_WORKSPACE/extracted"
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
+          unzip -q \
+            "${{ steps.zip.outputs.zip_file }}" \
+            -d "$GITHUB_WORKSPACE/extracted"
+
+          echo "ZIP extracted."
+
+      - name: Locate Shizuku project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            -name gradlew \
+            | head -n 1)"
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found inside the ZIP."
+
+            echo
+            echo "Extracted files:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -maxdepth 5 \
+              -print \
+              | head -300
+
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Show project contents
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          echo "Project root:"
+          pwd
+
+          echo
+          ls -la
+
+      - name: Populate Shizuku API module
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          if [ -d api ]; then
+            if [ -n "$(find api -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
+              echo "api module already populated."
+            else
+              echo "api directory is empty. Removing it."
+              rm -rf api
+            fi
+          fi
+
+          if [ ! -d api ]; then
+            echo "Downloading Shizuku API..."
+
+            git clone \
+              --depth 1 \
+              https://github.com/RikkaApps/Shizuku-API.git \
+              api
+          fi
+
+          echo
+          echo "API contents:"
+          ls -la api
+
+      - name: Set up Java 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
-
-
-      # ------------------------------------------------------------
-      # 3. Verify Java
-      # ------------------------------------------------------------
+          java-version: '21'
 
       - name: Verify Java
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
 
-
-      # ------------------------------------------------------------
-      # 4. Download Shizuku source WITH SUBMODULES
-      #
-      # Shizuku's own build instructions require:
-      # git clone --recurse-submodules
-      # ------------------------------------------------------------
-
-      - name: Download Shizuku source
+      - name: Install latest Android command line tools
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$GITHUB_WORKSPACE"
+          SDK="$HOME/android-sdk"
 
-          rm -rf extracted
-          mkdir -p extracted
+          mkdir -p "$SDK/cmdline-tools"
 
-          git clone \
-            --recurse-submodules \
-            https://github.com/RikkaApps/Shizuku.git \
-            extracted/Shizuku-master
+          cd "$RUNNER_TEMP"
 
-          cd extracted/Shizuku-master
+          rm -rf cmdline-tools
+          rm -f commandlinetools.zip
 
-          git submodule update \
-            --init \
-            --recursive
+          echo "Downloading current Android command line tools..."
 
-          echo
-          echo "Shizuku source downloaded."
-          echo
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip \
+            -O commandlinetools.zip
 
-          git rev-parse HEAD
+          unzip -q commandlinetools.zip
 
-          echo
-          echo "Top-level files:"
-          ls -lah
+          rm -rf "$SDK/cmdline-tools/latest"
+          mkdir -p "$SDK/cmdline-tools/latest"
 
+          mv cmdline-tools/* \
+            "$SDK/cmdline-tools/latest/"
 
-      # ------------------------------------------------------------
-      # 5. Save Shizuku path
-      # ------------------------------------------------------------
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-      - name: Configure Shizuku path
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Verify sdkmanager
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          SHIZUKU_DIR="$GITHUB_WORKSPACE/extracted/Shizuku-master"
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
 
-          if [ ! -f "$SHIZUKU_DIR/gradlew" ]; then
-            echo "ERROR: Shizuku gradlew was not found."
-            exit 1
-          fi
-
-          echo "SHIZUKU_DIR=$SHIZUKU_DIR" >> "$GITHUB_ENV"
-
-          echo "Shizuku directory:"
-          echo "$SHIZUKU_DIR"
-
-
-      # ------------------------------------------------------------
-      # 6. Install CURRENT Android command-line tools
-      # ------------------------------------------------------------
-
-      - name: Install Android command-line tools
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          SDK_ROOT="$ANDROID_SDK_ROOT"
-
-          CMDLINE_VERSION="15859902"
-
-          echo "Preparing Android SDK..."
-
-          mkdir -p "$SDK_ROOT"
-
-          rm -rf "$SDK_ROOT/cmdline-tools"
-
-          rm -f /tmp/android-commandline-tools.zip
-          rm -rf /tmp/android-commandline-tools
-
-          echo
-          echo "Downloading Android command-line tools..."
-          echo
-
-          wget \
-            --progress=dot:giga \
-            "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_VERSION}_latest.zip" \
-            -O /tmp/android-commandline-tools.zip
-
-          mkdir -p /tmp/android-commandline-tools
-
-          unzip -q \
-            /tmp/android-commandline-tools.zip \
-            -d /tmp/android-commandline-tools
-
-          mkdir -p "$SDK_ROOT/cmdline-tools/latest"
-
-          mv \
-            /tmp/android-commandline-tools/cmdline-tools/* \
-            "$SDK_ROOT/cmdline-tools/latest/"
-
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-
-          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$PATH"
-
-          echo
-          echo "sdkmanager location:"
+          echo "sdkmanager:"
           which sdkmanager
 
           echo
           echo "sdkmanager version:"
           sdkmanager --version
 
-
-      # ------------------------------------------------------------
-      # 7. Accept Android licenses
-      # ------------------------------------------------------------
-
-      - name: Accept Android licenses
+      - name: Accept Android SDK licenses
         shell: bash
         run: |
-          set -euxo pipefail
-
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
 
           yes | sdkmanager \
             --sdk_root="$ANDROID_SDK_ROOT" \
             --licenses \
-            >/dev/null || true
+            >/dev/null 2>&1 || true
 
-
-      # ------------------------------------------------------------
-      # 8. Install platform-tools
-      # ------------------------------------------------------------
-
-      - name: Install platform-tools
+      - name: Show Android 17 SDK packages
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
 
-          sdkmanager \
-            --sdk_root="$ANDROID_SDK_ROOT" \
-            --channel=3 \
-            "platform-tools"
-
-
-      # ------------------------------------------------------------
-      # 9. Install Android 17 / API 37
-      # ------------------------------------------------------------
-
-      - name: Install Android API 37
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
-
-          echo
-          echo "Available API 37 packages:"
-          echo
+          echo "========================================"
+          echo "Searching preview channels for API 37"
+          echo "========================================"
 
           sdkmanager \
             --sdk_root="$ANDROID_SDK_ROOT" \
             --list \
             --channel=3 \
-            | grep -E "platforms;android-37|build-tools;37" \
+            > "$RUNNER_TEMP/sdk-packages.txt"
+
+          grep -i -E \
+            "cinnamon|android-37|37\.0|api.?37" \
+            "$RUNNER_TEMP/sdk-packages.txt" \
             || true
 
           echo
-          echo "Installing Android API 37..."
+          echo "========================================"
+          echo "Available platform packages"
+          echo "========================================"
+
+          grep -E \
+            '^[[:space:]]*platforms;' \
+            "$RUNNER_TEMP/sdk-packages.txt" \
+            | tail -40 \
+            || true
+
+      - name: Verify Android 37 package exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_LIST="$RUNNER_TEMP/sdk-packages.txt"
+
+          if ! grep -qE \
+            '^[[:space:]]*platforms;android-37[[:space:]]*\|' \
+            "$SDK_LIST"; then
+
+            echo "ERROR: platforms;android-37 is not available."
+
+            echo
+            echo "Android 37 related entries:"
+            grep -i -E \
+              'android-37|cinnamon|api.?37' \
+              "$SDK_LIST" \
+              || true
+
+            exit 1
+          fi
+
+          echo "platforms;android-37 is available."
+
+      - name: Detect Android 37 Build Tools
+        id: buildtools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_LIST="$RUNNER_TEMP/sdk-packages.txt"
+
+          BUILD_TOOLS_PACKAGE="$(
+            grep -E \
+              '^[[:space:]]*build-tools;37\.' \
+              "$SDK_LIST" \
+              | sed -E 's/^[[:space:]]*//' \
+              | cut -d'|' -f1 \
+              | sed -E 's/[[:space:]]+$//' \
+              | sort -V \
+              | tail -n 1
+          )"
+
+          echo "Detected Build Tools:"
+          echo "$BUILD_TOOLS_PACKAGE"
+
+          if [ -z "$BUILD_TOOLS_PACKAGE" ]; then
+            echo "WARNING: No Build Tools 37.x package detected."
+            echo "Falling back to build-tools;36.0.0."
+
+            BUILD_TOOLS_PACKAGE="build-tools;36.0.0"
+          fi
+
+          echo "build_tools_package=$BUILD_TOOLS_PACKAGE" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Install Android 17 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+
+          echo "Installing platform-tools..."
+
+          sdkmanager \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools"
+
           echo
+          echo "Installing Android 17 API 37..."
 
           sdkmanager \
             --sdk_root="$ANDROID_SDK_ROOT" \
             --channel=3 \
             "platforms;android-37"
 
+          echo
+          echo "Installing Build Tools:"
+          echo "${{ steps.buildtools.outputs.build_tools_package }}"
 
-      # ------------------------------------------------------------
-      # 10. CRITICAL CHECK
-      #
-      # This specifically prevents the previous:
-      #
-      # Failed to find target with hash string 'android-37'
-      #
-      # ------------------------------------------------------------
+          sdkmanager \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --channel=3 \
+            "${{ steps.buildtools.outputs.build_tools_package }}"
 
-      - name: Verify Android API 37
+      - name: Verify Android API 37 installation
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          PLATFORM_DIR="$ANDROID_SDK_ROOT/platforms/android-37"
-          ANDROID_JAR="$PLATFORM_DIR/android.jar"
+          ANDROID_37="$ANDROID_SDK_ROOT/platforms/android-37"
+          ANDROID_JAR="$ANDROID_37/android.jar"
+
+          echo "Installed SDK platforms:"
+          find "$ANDROID_SDK_ROOT/platforms" \
+            -maxdepth 2 \
+            -type f \
+            -name android.jar \
+            -print \
+            || true
 
           echo
-          echo "Installed platforms:"
-          echo
-
-          ls -lah "$ANDROID_SDK_ROOT/platforms" || true
-
-          echo
-          echo "API 37 directory:"
-          echo
-
-          ls -lah "$PLATFORM_DIR" || true
+          echo "Android 37 directory:"
+          ls -la "$ANDROID_37" || true
 
           if [ ! -f "$ANDROID_JAR" ]; then
-
             echo
-            echo "================================================"
-            echo "ERROR: Android API 37 did not install correctly"
-            echo "================================================"
+            echo "=========================================="
+            echo "ERROR: Android API 37 installation failed"
+            echo "=========================================="
             echo
             echo "Missing:"
             echo "$ANDROID_JAR"
-            echo
-            echo "API 37 SDK packages available:"
-            echo
 
-            export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+            echo
+            echo "Available Android 37 SDK packages:"
+
+            export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
 
             sdkmanager \
               --sdk_root="$ANDROID_SDK_ROOT" \
               --list \
               --channel=3 \
-              | grep -i "android-37" \
+              | grep -i -E \
+                  'android-37|cinnamon|api.?37' \
               || true
 
             exit 1
@@ -285,210 +363,81 @@ jobs:
 
           echo
           echo "========================================"
-          echo "ANDROID API 37 VERIFIED SUCCESSFULLY"
+          echo "ANDROID API 37 VERIFIED"
           echo "========================================"
           echo
-          echo "$ANDROID_JAR exists."
-
-
-      # ------------------------------------------------------------
-      # 11. Install Build Tools
-      #
-      # Prefer newest 37.x if available.
-      # Fall back to 36.0.0 if necessary.
-      # ------------------------------------------------------------
-
-      - name: Install Android Build Tools
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
-
-          echo
-          echo "Looking for Build Tools 37.x..."
-          echo
-
-          BUILD_TOOLS_PACKAGE="$(
-            sdkmanager \
-              --sdk_root="$ANDROID_SDK_ROOT" \
-              --list \
-              --channel=3 \
-              | grep -oE 'build-tools;37\.[0-9]+\.[0-9]+' \
-              | sort -V \
-              | tail -n 1
-          )"
-
-          if [ -n "$BUILD_TOOLS_PACKAGE" ]; then
-
-            echo "Installing:"
-            echo "$BUILD_TOOLS_PACKAGE"
-
-            sdkmanager \
-              --sdk_root="$ANDROID_SDK_ROOT" \
-              --channel=3 \
-              "$BUILD_TOOLS_PACKAGE"
-
-          else
-
-            echo
-            echo "No Build Tools 37.x found."
-            echo "Falling back to Build Tools 36.0.0."
-            echo
-
-            sdkmanager \
-              --sdk_root="$ANDROID_SDK_ROOT" \
-              "build-tools;36.0.0"
-
-          fi
+          ls -lh "$ANDROID_JAR"
 
           echo
           echo "Installed Build Tools:"
-          ls -lah "$ANDROID_SDK_ROOT/build-tools"
+          ls -la "$ANDROID_SDK_ROOT/build-tools" || true
 
-
-      # ------------------------------------------------------------
-      # 12. Install CMake version requested by current Shizuku
-      #
-      # Current manager/build.gradle requests:
-      # 3.31.0+
-      # ------------------------------------------------------------
-
-      - name: Install Android CMake
+      - name: Prepare Gradle wrapper
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          CMAKE_PACKAGE="$(
-            sdkmanager \
-              --sdk_root="$ANDROID_SDK_ROOT" \
-              --list \
-              --channel=3 \
-              | grep -oE 'cmake;3\.31\.[0-9]+' \
-              | sort -V \
-              | tail -n 1
-          )"
+          chmod +x gradlew
 
-          echo
-          echo "Detected CMake package:"
-          echo "$CMAKE_PACKAGE"
+          ./gradlew --version
 
-          if [ -n "$CMAKE_PACKAGE" ]; then
-
-            sdkmanager \
-              --sdk_root="$ANDROID_SDK_ROOT" \
-              --channel=3 \
-              "$CMAKE_PACKAGE"
-
-          else
-
-            echo
-            echo "No SDK CMake 3.31.x package detected."
-            echo "Allowing Gradle to resolve its required CMake version."
-            echo
-
-          fi
-
-
-      # ------------------------------------------------------------
-      # 13. Setup Gradle caching AFTER source exists
-      #
-      # This avoids the previous:
-      #
-      # No file ... matched **/*.gradle*
-      #
-      # ------------------------------------------------------------
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-
-      # ------------------------------------------------------------
-      # 14. Inspect Shizuku's current build configuration
-      # ------------------------------------------------------------
-
-      - name: Inspect Shizuku build configuration
+      - name: Inspect Android build configuration
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$SHIZUKU_DIR"
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          echo
           echo "========================================"
-          echo "GRADLE WRAPPER"
+          echo "compileSdk / targetSdk"
           echo "========================================"
-          echo
-
-          cat gradle/wrapper/gradle-wrapper.properties
-
-          echo
-          echo "========================================"
-          echo "ANDROID GRADLE PLUGIN REFERENCES"
-          echo "========================================"
-          echo
 
           grep -RniE \
-            'com\.android\.tools\.build:gradle|com\.android\.application|com\.android\.library|agp' \
+            'compileSdk|compileSdkVersion|targetSdk|targetSdkVersion' \
             . \
             --include='*.gradle' \
             --include='*.gradle.kts' \
             --include='*.toml' \
             --include='*.properties' \
-            --exclude-dir='.git' \
-            --exclude-dir='build' \
+            --exclude-dir=.git \
+            --exclude-dir=build \
             || true
 
           echo
           echo "========================================"
-          echo "SDK CONFIG"
+          echo "Android Gradle Plugin"
           echo "========================================"
-          echo
 
           grep -RniE \
-            'compileSdk|compileSdkVersion|targetSdk|targetSdkVersion|buildToolsVersion' \
+            'com\.android\.tools\.build:gradle|8\.10\.1|9\.1\.1' \
             . \
             --include='*.gradle' \
             --include='*.gradle.kts' \
             --include='*.toml' \
             --include='*.properties' \
-            --exclude-dir='.git' \
-            --exclude-dir='build' \
+            --exclude-dir=.git \
+            --exclude-dir=build \
             || true
 
-
-      # ------------------------------------------------------------
-      # 15. Ensure compileSdk is API 37
-      #
-      # Handles several common Gradle declaration styles.
-      # ------------------------------------------------------------
-
-      - name: Configure compileSdk 37
+      - name: Force compileSdk 37
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$SHIZUKU_DIR"
-
-          echo
-          echo "Patching compileSdk references to API 37..."
-          echo
+          cd "${{ steps.project.outputs.project_dir }}"
 
           find . \
             -type f \
             \( \
-              -name "*.gradle" \
-              -o \
-              -name "*.gradle.kts" \
-              -o \
-              -name "*.toml" \
-              -o \
-              -name "*.properties" \
+              -name '*.gradle' \
+              -o -name '*.gradle.kts' \
+              -o -name '*.toml' \
+              -o -name '*.properties' \
             \) \
-            -not -path "./.git/*" \
-            -not -path "*/build/*" \
+            -not -path './.git/*' \
+            -not -path '*/build/*' \
             -print0 \
             | xargs -0 -r sed -i \
               -e 's/compileSdk = 36/compileSdk = 37/g' \
@@ -499,9 +448,7 @@ jobs:
               -e 's/compile_sdk = 36/compile_sdk = 37/g' \
               -e 's/compile_sdk=36/compile_sdk=37/g'
 
-          echo
-          echo "compileSdk references now:"
-          echo
+          echo "compileSdk references after patch:"
 
           grep -RniE \
             'compileSdk|compileSdkVersion|compile_sdk' \
@@ -510,21 +457,16 @@ jobs:
             --include='*.gradle.kts' \
             --include='*.toml' \
             --include='*.properties' \
-            --exclude-dir='.git' \
-            --exclude-dir='build' \
+            --exclude-dir=.git \
+            --exclude-dir=build \
             || true
 
-
-      # ------------------------------------------------------------
-      # 16. Add API 37 Gradle property
-      # ------------------------------------------------------------
-
-      - name: Configure Gradle properties
+      - name: Configure Gradle API 37 compatibility
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$SHIZUKU_DIR"
+          cd "${{ steps.project.outputs.project_dir }}"
 
           touch gradle.properties
 
@@ -532,221 +474,150 @@ jobs:
             '/^android\.suppressUnsupportedCompileSdk=/d' \
             gradle.properties
 
-          echo "" >> gradle.properties
-          echo "# Android 17 / API 37" >> gradle.properties
-          echo "android.suppressUnsupportedCompileSdk=37" >> gradle.properties
+          printf '\nandroid.suppressUnsupportedCompileSdk=37\n' \
+            >> gradle.properties
 
           echo
           echo "gradle.properties:"
-          echo
-
           cat gradle.properties
 
-
-      # ------------------------------------------------------------
-      # 17. Make wrapper executable
-      # ------------------------------------------------------------
-
-      - name: Make Gradle wrapper executable
+      - name: Show Gradle projects
         shell: bash
         run: |
-          set -euxo pipefail
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          cd "$SHIZUKU_DIR"
+          ./gradlew projects \
+            --no-daemon \
+            --stacktrace \
+            || true
 
-          chmod +x gradlew
-
-
-      # ------------------------------------------------------------
-      # 18. Verify complete environment before compilation
-      # ------------------------------------------------------------
-
-      - name: Verify build environment
+      - name: Show debug build tasks
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$SHIZUKU_DIR"
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          ./gradlew tasks \
+            --all \
+            --no-daemon \
+            | grep -E \
+                ':manager:assembleDebug|assembleDebug' \
+            || true
 
-          echo
-          echo "================================================"
-          echo "JAVA"
-          echo "================================================"
-          echo
-
-          java -version
-
-          echo
-          echo "JAVA_HOME=$JAVA_HOME"
-
-          echo
-          echo "================================================"
-          echo "GRADLE"
-          echo "================================================"
-          echo
-
-          ./gradlew --version
-
-          echo
-          echo "================================================"
-          echo "ANDROID SDK"
-          echo "================================================"
-          echo
-
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-
-          echo
-          echo "sdkmanager:"
-          sdkmanager --version
-
-          echo
-          echo "================================================"
-          echo "ANDROID API 37"
-          echo "================================================"
-          echo
-
-          test -f \
-            "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
-
-          ls -lh \
-            "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
-
-          echo
-          echo "================================================"
-          echo "BUILD TOOLS"
-          echo "================================================"
-          echo
-
-          ls -lah "$ANDROID_SDK_ROOT/build-tools"
-
-          echo
-          echo "================================================"
-          echo "SUBMODULE STATUS"
-          echo "================================================"
-          echo
-
-          git submodule status --recursive
-
-
-      # ------------------------------------------------------------
-      # 19. Clean previous outputs
-      # ------------------------------------------------------------
-
-      - name: Clean Shizuku
+      - name: Clean project
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$SHIZUKU_DIR"
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          ./gradlew \
-            clean \
+          ./gradlew clean \
             --no-daemon \
             --stacktrace
 
-
-      # ------------------------------------------------------------
-      # 20. BUILD
-      #
-      # Shizuku's documented APK build task is:
-      #
-      # :manager:assembleDebug
-      #
-      # ------------------------------------------------------------
-
-      - name: Build Shizuku Android 17 Debug APK
+      - name: Build Shizuku debug APK
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          cd "$SHIZUKU_DIR"
+          cd "${{ steps.project.outputs.project_dir }}"
 
-          ./gradlew \
-            :manager:assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all
+          echo "Checking for Shizuku manager module..."
 
+          if ./gradlew tasks --all --no-daemon \
+              | grep -q ':manager:assembleDebug'; then
 
-      # ------------------------------------------------------------
-      # 21. Display generated APKs
-      # ------------------------------------------------------------
+            echo
+            echo "Building :manager:assembleDebug"
+
+            ./gradlew \
+              :manager:assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all
+
+          else
+
+            echo
+            echo ":manager:assembleDebug not found."
+            echo "Using assembleDebug."
+
+            ./gradlew \
+              assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all
+          fi
 
       - name: Find generated APKs
-        if: always()
         shell: bash
         run: |
-          echo
-          echo "Generated APK files:"
-          echo
+          set -euo pipefail
 
-          find "$GITHUB_WORKSPACE" \
-            -type f \
-            -name "*.apk" \
-            -print \
-            || true
+          PROJECT="${{ steps.project.outputs.project_dir }}"
 
+          rm -rf "$GITHUB_WORKSPACE/apk-output"
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
-      # ------------------------------------------------------------
-      # 22. Collect Shizuku manager APK
-      # ------------------------------------------------------------
+          COUNT=0
 
-      - name: Collect APK
-        if: success()
-        shell: bash
-        run: |
-          set -euxo pipefail
+          while IFS= read -r APK; do
+            echo "Found APK:"
+            echo "$APK"
 
-          ARTIFACT_DIR="$GITHUB_WORKSPACE/artifacts"
+            BASENAME="$(basename "$APK")"
 
-          rm -rf "$ARTIFACT_DIR"
-          mkdir -p "$ARTIFACT_DIR"
+            DEST="$GITHUB_WORKSPACE/apk-output/$BASENAME"
 
-          echo
-          echo "Looking for Shizuku manager APK..."
-          echo
+            if [ -e "$DEST" ]; then
+              MODULE="$(
+                echo "$APK" \
+                  | sed "s#^$PROJECT/##" \
+                  | cut -d/ -f1
+              )"
 
-          find "$SHIZUKU_DIR/manager" \
-            -type f \
-            -name "*.apk" \
-            -exec cp -v {} "$ARTIFACT_DIR/" \;
+              DEST="$GITHUB_WORKSPACE/apk-output/${MODULE}-${BASENAME}"
+            fi
 
-          echo
-          echo "Collected files:"
-          echo
+            cp "$APK" "$DEST"
 
-          ls -lah "$ARTIFACT_DIR"
-
-          APK_COUNT="$(
-            find "$ARTIFACT_DIR" \
-              -maxdepth 1 \
+            COUNT=$((COUNT + 1))
+          done < <(
+            find "$PROJECT" \
               -type f \
-              -name "*.apk" \
-              | wc -l
-          )"
+              -path '*/build/outputs/apk/*' \
+              -name '*.apk'
+          )
 
-          echo
-          echo "APK count: $APK_COUNT"
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo
-            echo "ERROR: Build succeeded but no manager APK was found."
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: Build completed but no APK was found."
             exit 1
           fi
 
+          echo
+          echo "Collected $COUNT APK(s)."
 
-      # ------------------------------------------------------------
-      # 23. Upload APK to GitHub Actions artifacts
-      # ------------------------------------------------------------
+      - name: Display APK information
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Upload Shizuku Android 17 APK
-        if: success()
+          echo "APK output:"
+          ls -lh "$GITHUB_WORKSPACE/apk-output"
+
+          echo
+
+          for APK in "$GITHUB_WORKSPACE"/apk-output/*.apk; do
+            echo "--------------------------------"
+            echo "$APK"
+            sha256sum "$APK"
+          done
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Shizuku-Android-17-Debug
-          path: artifacts/*.apk
+          name: Shizuku-Android17-Debug-APK
+          path: apk-output/*.apk
           if-no-files-found: error
           retention-days: 30
