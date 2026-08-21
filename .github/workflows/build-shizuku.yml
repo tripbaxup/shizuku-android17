@@ -1,0 +1,228 @@
+name: Build Shizuku Android 17 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find uploaded ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "Found ZIP:"
+          echo "$ZIP_FILE"
+
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf "$GITHUB_WORKSPACE/extracted"
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
+          unzip -q "${{ steps.zip.outputs.zip_file }}" \
+            -d "$GITHUB_WORKSPACE/extracted"
+
+          echo "Extracted files:"
+          find "$GITHUB_WORKSPACE/extracted" -maxdepth 3 -type f | head -100
+
+      - name: Locate Shizuku project
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            -name gradlew \
+            | head -n 1)"
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: Could not find gradlew inside ZIP."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          echo "Shizuku project located at:"
+          echo "$PROJECT_DIR"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Show project structure
+        shell: bash
+        run: |
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          echo "PROJECT ROOT:"
+          pwd
+
+          echo
+          echo "CONTENTS:"
+          ls -la
+
+          echo
+          echo "GRADLE FILES:"
+          find . -maxdepth 2 \
+            \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'gradle.properties' \) \
+            -print
+
+      - name: Populate Shizuku API module
+        shell: bash
+        run: |
+          set -e
+
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          if [ -d api ]; then
+            echo "Existing api directory found."
+
+            if [ -n "$(find api -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
+              echo "api directory already contains files."
+            else
+              echo "api directory is empty. Replacing it."
+              rm -rf api
+            fi
+          fi
+
+          if [ ! -d api ]; then
+            echo "Downloading Shizuku API source..."
+
+            git clone \
+              --depth 1 \
+              https://github.com/RikkaApps/Shizuku-API.git \
+              api
+          fi
+
+          echo
+          echo "API MODULE:"
+          ls -la api
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 37
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-37" \
+            "build-tools;35.0.1"
+
+      - name: Prepare Gradle wrapper
+        shell: bash
+        run: |
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          chmod +x gradlew
+
+          ./gradlew --version
+
+      - name: Clean project
+        shell: bash
+        run: |
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          ./gradlew clean \
+            --stacktrace \
+            --no-daemon
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          ./gradlew assembleDebug \
+            --stacktrace \
+            --no-daemon
+
+      - name: Find generated APKs
+        id: apk
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="${{ steps.project.outputs.project_dir }}"
+
+          echo "Generated APK files:"
+          find "$PROJECT" \
+            -type f \
+            -name '*.apk' \
+            -print
+
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          COUNT=0
+
+          while IFS= read -r APK; do
+            cp "$APK" "$GITHUB_WORKSPACE/apk-output/"
+            COUNT=$((COUNT + 1))
+          done < <(
+            find "$PROJECT" \
+              -type f \
+              -name '*.apk'
+          )
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: Build completed but no APK was found."
+            exit 1
+          fi
+
+          echo
+          echo "Collected $COUNT APK(s)."
+
+      - name: Display APK information
+        shell: bash
+        run: |
+          echo "APK output:"
+          ls -lh "$GITHUB_WORKSPACE/apk-output"
+
+          echo
+          for APK in "$GITHUB_WORKSPACE"/apk-output/*.apk; do
+            echo "--------------------------------"
+            echo "$APK"
+            sha256sum "$APK"
+          done
+          
+ - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shizuku-Android17-Debug-APK
+          path: apk-output/*.apk
+          if-no-files-found: error
+          retention-days: 30
+          name: Shizuku-Android17-Debug-APK
+          path: apk-output/*.apk
+          if-no-files-found: error
+          retention-days: 30
