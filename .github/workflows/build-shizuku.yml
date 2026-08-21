@@ -44,7 +44,7 @@ jobs:
           unzip -q "${{ steps.zip.outputs.zip_file }}" \
             -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "Extracted source."
+          echo "Source extracted."
 
       - name: Locate Shizuku project
         id: project
@@ -52,7 +52,10 @@ jobs:
         run: |
           set -e
 
-          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" -type f -name gradlew | head -n 1)"
+          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            -name gradlew \
+            | head -n 1)"
 
           if [ -z "$GRADLEW" ]; then
             echo "ERROR: Could not find gradlew inside ZIP."
@@ -66,16 +69,12 @@ jobs:
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Show project information
+      - name: Show project contents
         shell: bash
         run: |
           cd "${{ steps.project.outputs.project_dir }}"
 
-          echo "Project root:"
           pwd
-
-          echo
-          echo "Top-level contents:"
           ls -la
 
       - name: Populate Shizuku API module
@@ -86,16 +85,17 @@ jobs:
           cd "${{ steps.project.outputs.project_dir }}"
 
           if [ -d api ]; then
-            if [ -n "$(find api -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
-              echo "Existing api module is populated."
-            else
-              echo "Existing api directory is empty."
+            if [ -z "$(find api -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
+              echo "Empty api directory found."
               rm -rf api
+            else
+              echo "Existing api module already populated."
             fi
           fi
 
           if [ ! -d api ]; then
             echo "Downloading Shizuku API..."
+
             git clone \
               --depth 1 \
               https://github.com/RikkaApps/Shizuku-API.git \
@@ -103,7 +103,7 @@ jobs:
           fi
 
           echo
-          echo "API directory:"
+          echo "API contents:"
           ls -la api
 
       - name: Set up Java 21
@@ -112,10 +112,143 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      #
+      # USE A CLEAN SDK INSTEAD OF THE RUNNER'S OLD SDK
+      #
 
-      - name: Update Android SDK command-line tools
+      - name: Create clean Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> "$GITHUB_ENV"
+
+      - name: Download latest Android command-line tools
+        shell: bash
+        run: |
+          set -e
+
+          cd "$RUNNER_TEMP"
+
+          echo "Downloading latest Google Android command-line tools..."
+
+          curl -fL \
+            "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip" \
+            -o commandlinetools.zip
+
+          rm -rf cmdline-temp
+          mkdir cmdline-temp
+
+          unzip -q commandlinetools.zip -d cmdline-temp
+
+          mkdir -p "$HOME/android-sdk/cmdline-tools/latest"
+
+          cp -R \
+            cmdline-temp/cmdline-tools/* \
+            "$HOME/android-sdk/cmdline-tools/latest/"
+
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$HOME/android-sdk/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Verify sdkmanager
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+
+          echo "sdkmanager:"
+          which sdkmanager
+
+          echo
+          echo "Version:"
+          sdkmanager --version
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
+            --licenses >/dev/null 2>&1 || true
+
+      #
+      # PRINT THE REAL API 37 PACKAGE NAMES
+      #
+
+      - name: Discover Android 17 SDK packages
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+
+          echo "======================================="
+          echo "ANDROID 17 / API 37 PACKAGES"
+          echo "======================================="
+
+          sdkmanager \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --list \
+            --channel=3 \
+            | grep -i -E \
+              "platforms;android-37|build-tools;37|cinnamon|android-37" \
+            || true
+
+      #
+      # TRY STABLE FIRST
+      #
+
+      - name: Install Android 17 API 37
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+
+          echo "Installing platform tools..."
+          sdkmanager \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools"
+
+          echo
+          echo "Installing Android API 37..."
+
+          sdkmanager \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --channel=3 \
+            "platforms;android-37"
+
+          echo
+          echo "Finding newest Build Tools 37..."
+
+          BUILD_TOOLS_PACKAGE="$(
+            sdkmanager \
+              --sdk_root="$ANDROID_SDK_ROOT" \
+              --list \
+              --channel=3 \
+              | grep -oE 'build-tools;37\.[0-9]+\.[0-9]+' \
+              | sort -V \
+              | tail -n 1
+          )"
+
+          echo "Build tools package:"
+          echo "$BUILD_TOOLS_PACKAGE"
+
+          if [ -z "$BUILD_TOOLS_PACKAGE" ]; then
+            echo "ERROR: No Android 37 Build Tools package found."
+            exit 1
+          fi
+
+          sdkmanager \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --channel=3 \
+            "$BUILD_TOOLS_PACKAGE"
+
+      - name: Verify Android 17 SDK
         shell: bash
         run: |
           set -e
@@ -124,56 +257,32 @@ jobs:
           echo "$ANDROID_SDK_ROOT"
 
           echo
-          echo "Current sdkmanager:"
-          which sdkmanager
-          sdkmanager --version || true
+          echo "Platforms:"
+          find "$ANDROID_SDK_ROOT/platforms" \
+            -maxdepth 1 \
+            -type d \
+            -print || true
 
           echo
-          echo "Accepting licenses..."
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          echo "Build Tools:"
+          find "$ANDROID_SDK_ROOT/build-tools" \
+            -maxdepth 1 \
+            -type d \
+            -print || true
 
-          echo
-          echo "Updating SDK packages..."
-          sdkmanager --update || true
-
-      - name: Show available Android 17 packages
-        shell: bash
-        run: |
-          echo "Searching SDK repository for Android 17/API 37 packages..."
-
-          sdkmanager --list --channel=3 | \
-            grep -i -E "android-37|37\.0|cinnamon" || true
-
-      - name: Install Android 17 SDK
-        shell: bash
-        run: |
-          set -e
-
-          echo "Installing Android 17/API 37..."
-
-          sdkmanager --channel=3 \
-            "platform-tools" \
-            "platforms;android-37" \
-            "build-tools;37.0.0"
-
-      - name: Verify Android SDK installation
-        shell: bash
-        run: |
-          set -e
-
-          echo "Installed Android platforms:"
-          ls -la "$ANDROID_SDK_ROOT/platforms" || true
-
-          echo
-          echo "Installed build tools:"
-          ls -la "$ANDROID_SDK_ROOT/build-tools" || true
-
-          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
-            echo "ERROR: Android API 37 platform was not installed."
+          if [ ! -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" ]; then
+            echo "ERROR: android-37/android.jar is missing."
             exit 1
           fi
 
-      - name: Prepare Gradle wrapper
+          echo
+          echo "Android 17 SDK installation looks good."
+
+      #
+      # BUILD
+      #
+
+      - name: Prepare Gradle
         shell: bash
         run: |
           set -e
@@ -184,7 +293,7 @@ jobs:
 
           ./gradlew --version
 
-      - name: Show Gradle project
+      - name: Show Gradle projects
         shell: bash
         run: |
           cd "${{ steps.project.outputs.project_dir }}"
@@ -215,6 +324,10 @@ jobs:
             --no-daemon \
             --stacktrace
 
+      #
+      # COLLECT APK
+      #
+
       - name: Find generated APKs
         shell: bash
         run: |
@@ -224,17 +337,23 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
-          echo "Searching for APK files..."
-
           COUNT=0
 
+          echo "Searching for generated APK files..."
+
           while IFS= read -r APK; do
+            echo
             echo "Found:"
             echo "$APK"
 
-            cp "$APK" "$GITHUB_WORKSPACE/apk-output/"
+            BASENAME="$(basename "$APK")"
+
+            cp \
+              "$APK" \
+              "$GITHUB_WORKSPACE/apk-output/$BASENAME"
 
             COUNT=$((COUNT + 1))
+
           done < <(
             find "$PROJECT" \
               -type f \
@@ -242,7 +361,7 @@ jobs:
           )
 
           if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: Build completed but no APK was found."
+            echo "ERROR: No APK was produced."
             exit 1
           fi
 
@@ -252,13 +371,13 @@ jobs:
       - name: Display APK information
         shell: bash
         run: |
-          echo "APK output:"
+          echo "APK files:"
           ls -lh "$GITHUB_WORKSPACE/apk-output"
 
           echo
 
           for APK in "$GITHUB_WORKSPACE"/apk-output/*.apk; do
-            echo "--------------------------------"
+            echo "======================================="
             echo "$APK"
             sha256sum "$APK"
           done
