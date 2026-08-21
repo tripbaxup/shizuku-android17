@@ -44,8 +44,7 @@ jobs:
           unzip -q "${{ steps.zip.outputs.zip_file }}" \
             -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "Extracted files:"
-          find "$GITHUB_WORKSPACE/extracted" -maxdepth 3 -type f | head -100
+          echo "Extracted source."
 
       - name: Locate Shizuku project
         id: project
@@ -53,10 +52,7 @@ jobs:
         run: |
           set -e
 
-          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" \
-            -type f \
-            -name gradlew \
-            | head -n 1)"
+          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" -type f -name gradlew | head -n 1)"
 
           if [ -z "$GRADLEW" ]; then
             echo "ERROR: Could not find gradlew inside ZIP."
@@ -65,28 +61,22 @@ jobs:
 
           PROJECT_DIR="$(dirname "$GRADLEW")"
 
-          echo "Shizuku project located at:"
+          echo "Project root:"
           echo "$PROJECT_DIR"
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Show project structure
+      - name: Show project information
         shell: bash
         run: |
           cd "${{ steps.project.outputs.project_dir }}"
 
-          echo "PROJECT ROOT:"
+          echo "Project root:"
           pwd
 
           echo
-          echo "CONTENTS:"
+          echo "Top-level contents:"
           ls -la
-
-          echo
-          echo "GRADLE FILES:"
-          find . -maxdepth 2 \
-            \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'gradle.properties' \) \
-            -print
 
       - name: Populate Shizuku API module
         shell: bash
@@ -96,19 +86,16 @@ jobs:
           cd "${{ steps.project.outputs.project_dir }}"
 
           if [ -d api ]; then
-            echo "Existing api directory found."
-
             if [ -n "$(find api -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
-              echo "api directory already contains files."
+              echo "Existing api module is populated."
             else
-              echo "api directory is empty. Replacing it."
+              echo "Existing api directory is empty."
               rm -rf api
             fi
           fi
 
           if [ ! -d api ]; then
-            echo "Downloading Shizuku API source..."
-
+            echo "Downloading Shizuku API..."
             git clone \
               --depth 1 \
               https://github.com/RikkaApps/Shizuku-API.git \
@@ -116,7 +103,7 @@ jobs:
           fi
 
           echo
-          echo "API MODULE:"
+          echo "API directory:"
           ls -la api
 
       - name: Set up Java 21
@@ -128,35 +115,96 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android API 37
+      - name: Update Android SDK command-line tools
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
+          set -e
 
-          sdkmanager \
+          echo "SDK root:"
+          echo "$ANDROID_SDK_ROOT"
+
+          echo
+          echo "Current sdkmanager:"
+          which sdkmanager
+          sdkmanager --version || true
+
+          echo
+          echo "Accepting licenses..."
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          echo
+          echo "Updating SDK packages..."
+          sdkmanager --update || true
+
+      - name: Show available Android 17 packages
+        shell: bash
+        run: |
+          echo "Searching SDK repository for Android 17/API 37 packages..."
+
+          sdkmanager --list --channel=3 | \
+            grep -i -E "android-37|37\.0|cinnamon" || true
+
+      - name: Install Android 17 SDK
+        shell: bash
+        run: |
+          set -e
+
+          echo "Installing Android 17/API 37..."
+
+          sdkmanager --channel=3 \
             "platform-tools" \
             "platforms;android-37" \
-            "build-tools;35.0.1"
+            "build-tools;37.0.0"
+
+      - name: Verify Android SDK installation
+        shell: bash
+        run: |
+          set -e
+
+          echo "Installed Android platforms:"
+          ls -la "$ANDROID_SDK_ROOT/platforms" || true
+
+          echo
+          echo "Installed build tools:"
+          ls -la "$ANDROID_SDK_ROOT/build-tools" || true
+
+          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
+            echo "ERROR: Android API 37 platform was not installed."
+            exit 1
+          fi
 
       - name: Prepare Gradle wrapper
         shell: bash
         run: |
+          set -e
+
           cd "${{ steps.project.outputs.project_dir }}"
 
           chmod +x gradlew
 
           ./gradlew --version
 
-      - name: Clean project
+      - name: Show Gradle project
         shell: bash
         run: |
           cd "${{ steps.project.outputs.project_dir }}"
 
-          ./gradlew clean \
-            --stacktrace \
-            --no-daemon
+          ./gradlew projects \
+            --no-daemon \
+            --stacktrace || true
 
-      - name: Build debug APK
+      - name: Clean project
+        shell: bash
+        run: |
+          set -e
+
+          cd "${{ steps.project.outputs.project_dir }}"
+
+          ./gradlew clean \
+            --no-daemon \
+            --stacktrace
+
+      - name: Build Shizuku debug APK
         shell: bash
         run: |
           set -e
@@ -164,29 +212,28 @@ jobs:
           cd "${{ steps.project.outputs.project_dir }}"
 
           ./gradlew assembleDebug \
-            --stacktrace \
-            --no-daemon
+            --no-daemon \
+            --stacktrace
 
       - name: Find generated APKs
-        id: apk
         shell: bash
         run: |
           set -e
 
           PROJECT="${{ steps.project.outputs.project_dir }}"
 
-          echo "Generated APK files:"
-          find "$PROJECT" \
-            -type f \
-            -name '*.apk' \
-            -print
-
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          echo "Searching for APK files..."
 
           COUNT=0
 
           while IFS= read -r APK; do
+            echo "Found:"
+            echo "$APK"
+
             cp "$APK" "$GITHUB_WORKSPACE/apk-output/"
+
             COUNT=$((COUNT + 1))
           done < <(
             find "$PROJECT" \
@@ -209,6 +256,7 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/apk-output"
 
           echo
+
           for APK in "$GITHUB_WORKSPACE"/apk-output/*.apk; do
             echo "--------------------------------"
             echo "$APK"
