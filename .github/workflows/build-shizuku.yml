@@ -12,17 +12,11 @@ jobs:
     timeout-minutes: 60
 
     steps:
-
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-
       # ============================================================
-      # FIND SOURCE ZIP
+      # FIND ZIP
       # ============================================================
 
       - name: Find source ZIP
@@ -31,28 +25,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP="$(
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 1 \
-              -type f \
-              -iname '*.zip' \
-              | head -1
-          )"
+          ZIP="$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 1 \
+            -type f \
+            -iname '*.zip' \
+            | head -1)"
 
           if [ -z "$ZIP" ]; then
-            echo "ERROR: No ZIP found in repository root."
-            ls -lah "$GITHUB_WORKSPACE"
+            echo "ERROR: No ZIP found."
             exit 1
           fi
 
-          echo "Found source ZIP:"
-          echo "$ZIP"
-
+          echo "ZIP: $ZIP"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-
       # ============================================================
-      # EXTRACT SOURCE
+      # EXTRACT
       # ============================================================
 
       - name: Extract source
@@ -61,32 +49,26 @@ jobs:
           set -euo pipefail
 
           rm -rf "$GITHUB_WORKSPACE/extracted"
-
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
           unzip -q \
             "${{ steps.zip.outputs.zip }}" \
             -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "Source extracted."
-
-
       # ============================================================
-      # LOCATE SHIZUKU PROJECT
+      # FIND PROJECT
       # ============================================================
 
-      - name: Locate Shizuku project
+      - name: Locate project
         id: project
         shell: bash
         run: |
           set -euo pipefail
 
-          GRADLEW="$(
-            find "$GITHUB_WORKSPACE/extracted" \
-              -type f \
-              -name gradlew \
-              | head -1
-          )"
+          GRADLEW="$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f \
+            -name gradlew \
+            | head -1)"
 
           if [ -z "$GRADLEW" ]; then
             echo "ERROR: gradlew not found."
@@ -95,14 +77,11 @@ jobs:
 
           PROJECT="$(dirname "$GRADLEW")"
 
-          echo "Project:"
-          echo "$PROJECT"
-
+          echo "Project: $PROJECT"
           echo "dir=$PROJECT" >> "$GITHUB_OUTPUT"
 
-
       # ============================================================
-      # POPULATE SHIZUKU API
+      # API SUBMODULE
       # ============================================================
 
       - name: Populate Shizuku API
@@ -113,59 +92,26 @@ jobs:
           cd "${{ steps.project.outputs.dir }}"
 
           if [ ! -d "api/api" ]; then
-
-            echo "API submodule contents are missing."
-            echo "Downloading Shizuku API..."
-
             rm -rf api
 
             git clone \
               --depth 1 \
               https://github.com/RikkaApps/Shizuku-API.git \
               api
-
-          else
-
-            echo "Shizuku API is already populated."
-
           fi
 
-          echo
-          echo "API directories:"
-
-          find api \
-            -maxdepth 1 \
-            -mindepth 1 \
-            -type d \
-            -printf '%f\n' \
-            | sort
-
-
       # ============================================================
-      # CREATE HIDDEN API STUB
+      # HIDDEN API STUB
       # ============================================================
 
-      - name: Fix hidden API stub
+      - name: Create hidden API stub
         shell: bash
         run: |
           set -euo pipefail
 
           cd "${{ steps.project.outputs.dir }}"
 
-          if [ ! -d "api/demo-hidden-api-stub" ]; then
-
-            echo "ERROR:"
-            echo "api/demo-hidden-api-stub does not exist."
-
-            find api \
-              -maxdepth 2 \
-              -type d \
-              | sort
-
-            exit 1
-          fi
-
-          echo "Creating hidden-api-stub..."
+          test -d api/demo-hidden-api-stub
 
           rm -rf api/hidden-api-stub
 
@@ -173,16 +119,11 @@ jobs:
             api/demo-hidden-api-stub \
             api/hidden-api-stub
 
-          echo
-          echo "Original hidden-api-stub build.gradle:"
-          cat api/hidden-api-stub/build.gradle
-
-
       # ============================================================
       # FIX HIDDEN API STUB FOR GRADLE 9
       # ============================================================
 
-      - name: Make hidden API stub Gradle 9 compatible
+      - name: Fix hidden API stub for Gradle 9
         shell: bash
         run: |
           set -euo pipefail
@@ -193,30 +134,25 @@ jobs:
           from pathlib import Path
 
           p = Path("api/hidden-api-stub/build.gradle")
-
-          if not p.exists():
-              raise SystemExit(
-                  "ERROR: api/hidden-api-stub/build.gradle missing"
-              )
-
           text = p.read_text()
-          lines = text.splitlines()
 
+          lines = text.splitlines()
           output = []
+
           source = None
           target = None
 
           for line in lines:
-              stripped = line.strip()
+              s = line.strip()
 
-              if stripped.startswith("sourceCompatibility"):
+              if s.startswith("sourceCompatibility"):
                   if "=" in line:
                       source = line.split("=", 1)[1].strip()
                   else:
                       source = "JavaVersion.VERSION_11"
                   continue
 
-              if stripped.startswith("targetCompatibility"):
+              if s.startswith("targetCompatibility"):
                   if "=" in line:
                       target = line.split("=", 1)[1].strip()
                   else:
@@ -226,12 +162,8 @@ jobs:
               output.append(line)
 
           if source or target:
-
-              if not source:
-                  source = "JavaVersion.VERSION_11"
-
-              if not target:
-                  target = source
+              source = source or "JavaVersion.VERSION_11"
+              target = target or source
 
               output.extend([
                   "",
@@ -244,13 +176,11 @@ jobs:
           p.write_text("\n".join(output) + "\n")
           PY
 
-          echo
-          echo "Updated hidden-api-stub build.gradle:"
+          echo "hidden-api-stub:"
           cat api/hidden-api-stub/build.gradle
 
-
       # ============================================================
-      # JAVA 21
+      # JAVA
       # ============================================================
 
       - name: Set up Java 21
@@ -259,20 +189,11 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-
-      - name: Verify Java
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          java -version
-
-
       # ============================================================
-      # ANDROID COMMAND LINE TOOLS
+      # ANDROID SDK
       # ============================================================
 
-      - name: Install Android command line tools
+      - name: Install Android SDK tools
         shell: bash
         run: |
           set -euo pipefail
@@ -287,16 +208,13 @@ jobs:
           rm -rf cmdline-tools
           rm -f android-tools.zip
 
-          echo "Downloading Android command line tools..."
-
           wget -q \
             https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip \
             -O android-tools.zip
 
           unzip -q android-tools.zip
 
-          mkdir -p \
-            "$SDK/cmdline-tools/latest"
+          mkdir -p "$SDK/cmdline-tools/latest"
 
           mv \
             cmdline-tools/* \
@@ -305,32 +223,14 @@ jobs:
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-          echo "$SDK/cmdline-tools/latest/bin" \
-            >> "$GITHUB_PATH"
-
-          echo "$SDK/platform-tools" \
-            >> "$GITHUB_PATH"
-
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
       # ============================================================
-      # VERIFY SDKMANAGER
+      # LICENSES
       # ============================================================
 
-      - name: Verify sdkmanager
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
-
-          sdkmanager --version
-
-
-      # ============================================================
-      # ACCEPT LICENSES
-      # ============================================================
-
-      - name: Accept Android SDK licenses
+      - name: Accept licenses
         shell: bash
         run: |
           export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
@@ -340,19 +240,16 @@ jobs:
             --licenses \
             >/dev/null 2>&1 || true
 
-
       # ============================================================
-      # INSTALL ANDROID 17 / API 37.0
+      # ANDROID 17
       # ============================================================
 
-      - name: Install Android 17 SDK
+      - name: Install Android 17
         shell: bash
         run: |
           set -euo pipefail
 
           export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
-
-          echo "Installing Android 17 / API 37.0..."
 
           sdkmanager \
             --sdk_root="$ANDROID_SDK_ROOT" \
@@ -361,49 +258,19 @@ jobs:
             "platforms;android-37.0" \
             "build-tools;36.0.0"
 
+          test -f \
+            "$ANDROID_SDK_ROOT/platforms/android-37.0/android.jar"
 
       # ============================================================
-      # VERIFY ANDROID 37.0
+      # AGP 9.1.1
       # ============================================================
 
-      - name: Verify Android 17 SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ANDROID_JAR="$ANDROID_SDK_ROOT/platforms/android-37.0/android.jar"
-
-          if [ ! -f "$ANDROID_JAR" ]; then
-
-            echo "ERROR: API 37.0 android.jar missing."
-
-            find "$ANDROID_SDK_ROOT/platforms" \
-              -maxdepth 2 \
-              -type f \
-              -name android.jar \
-              -print \
-              || true
-
-            exit 1
-          fi
-
-          echo "Android 37.0 ready:"
-
-          ls -lh "$ANDROID_JAR"
-
-
-      # ============================================================
-      # UPGRADE AGP 8.10.1 -> 9.1.1
-      # ============================================================
-
-      - name: Upgrade Android Gradle Plugin
+      - name: Upgrade AGP
         shell: bash
         run: |
           set -euo pipefail
 
           cd "${{ steps.project.outputs.dir }}"
-
-          echo "Updating AGP 8.10.1 -> 9.1.1"
 
           grep -RIl \
             --exclude-dir=.git \
@@ -411,58 +278,38 @@ jobs:
             '8\.10\.1' \
             . \
             | while read -r FILE; do
-
-                echo "Updating:"
-                echo "$FILE"
-
                 sed -i \
                   's/8\.10\.1/9.1.1/g' \
                   "$FILE"
-
               done
 
-          echo
-          echo "AGP 9.1.1 references:"
-
-          grep -Rni \
-            --exclude-dir=.git \
-            --exclude-dir=build \
-            '9\.1\.1' \
-            . \
-            || true
-
+          echo "AGP updated to 9.1.1"
 
       # ============================================================
       # GRADLE 9.3.1
       # ============================================================
 
-      - name: Upgrade Gradle wrapper
+      - name: Upgrade Gradle
         shell: bash
         run: |
           set -euo pipefail
 
           cd "${{ steps.project.outputs.dir }}"
 
-          WRAPPER="gradle/wrapper/gradle-wrapper.properties"
-
-          if [ ! -f "$WRAPPER" ]; then
-            echo "ERROR: Gradle wrapper properties missing."
-            exit 1
-          fi
-
           sed -i \
             's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip#' \
-            "$WRAPPER"
-
-          echo "Gradle wrapper:"
-          cat "$WRAPPER"
-
+            gradle/wrapper/gradle-wrapper.properties
 
       # ============================================================
-      # GRADLE PROPERTIES
+      # AGP 9 KOTLIN COMPATIBILITY
+      #
+      # AGP 9 includes Kotlin support.
+      # This Shizuku source still applies kotlin-android itself.
+      # Disable AGP's built-in Kotlin so the existing project can
+      # continue using org.jetbrains.kotlin.android 2.1.21.
       # ============================================================
 
-      - name: Configure Gradle properties
+      - name: Configure AGP 9 Kotlin compatibility
         shell: bash
         run: |
           set -euo pipefail
@@ -471,65 +318,73 @@ jobs:
 
           touch gradle.properties
 
-          # Remove compatibility hacks from previous builds.
+          sed -i \
+            '/^android\.builtInKotlin=/d' \
+            gradle.properties
+
+          sed -i \
+            '/^android\.newDsl=/d' \
+            gradle.properties
 
           sed -i \
             '/^android\.suppressUnsupportedCompileSdk=/d' \
             gradle.properties
 
+          echo "android.builtInKotlin=false" \
+            >> gradle.properties
+
+          echo "android.newDsl=false" \
+            >> gradle.properties
+
           echo
           echo "gradle.properties:"
           cat gradle.properties
 
-
       # ============================================================
-      # VERIFY COMPILE SDK
+      # SHOW IMPORTANT VERSIONS
       # ============================================================
 
-      - name: Verify compile SDK configuration
+      - name: Show build configuration
         shell: bash
         run: |
           set -euo pipefail
 
           cd "${{ steps.project.outputs.dir }}"
 
-          echo "Current SDK configuration:"
+          echo "=============================="
+          echo "Java"
+          echo "=============================="
+
+          java -version
+
+          echo
+          echo "=============================="
+          echo "Gradle"
+          echo "=============================="
+
+          chmod +x gradlew
+          ./gradlew --version
+
+          echo
+          echo "=============================="
+          echo "Kotlin plugin references"
+          echo "=============================="
 
           grep -RniE \
-            'compileSdk|compileSdkVersion|targetSdk|targetSdkVersion' \
+            'org\.jetbrains\.kotlin|kotlin.android|kotlin-android' \
             . \
             --include='*.gradle' \
             --include='*.gradle.kts' \
             --include='*.toml' \
-            --include='*.properties' \
             --exclude-dir=.git \
             --exclude-dir=build \
             || true
-
-
-      # ============================================================
-      # PREPARE GRADLE
-      # ============================================================
-
-      - name: Prepare Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${{ steps.project.outputs.dir }}"
-
-          chmod +x gradlew
-
-          echo "Gradle version:"
-
-          ./gradlew --version
-
 
       # ============================================================
       # CLEAN
       # ============================================================
 
-      - name: Clean project
+      - name: Clean
         shell: bash
         run: |
           set -euo pipefail
@@ -541,28 +396,26 @@ jobs:
             --no-daemon \
             --stacktrace
 
-
       # ============================================================
       # BUILD
       # ============================================================
 
-      - name: Build Shizuku
+      - name: Build APK
         shell: bash
         run: |
           set -euo pipefail
 
           cd "${{ steps.project.outputs.dir }}"
 
-          echo "Building Shizuku for Android 17..."
+          echo "Building Shizuku..."
 
           ./gradlew \
             assembleDebug \
             --no-daemon \
             --stacktrace
 
-
       # ============================================================
-      # COLLECT APK FILES
+      # COLLECT APK
       # ============================================================
 
       - name: Collect APKs
@@ -571,25 +424,23 @@ jobs:
           set -euo pipefail
 
           PROJECT="${{ steps.project.outputs.dir }}"
-
           OUTPUT="$GITHUB_WORKSPACE/apk-output"
 
           rm -rf "$OUTPUT"
-
           mkdir -p "$OUTPUT"
 
           COUNT=0
 
           while IFS= read -r APK; do
 
-            echo "Found APK:"
+            echo "Found:"
             echo "$APK"
 
-            BASENAME="$(basename "$APK")"
+            NAME="$(basename "$APK")"
 
             cp \
               "$APK" \
-              "$OUTPUT/${COUNT}-${BASENAME}"
+              "$OUTPUT/${COUNT}-${NAME}"
 
             COUNT=$((COUNT + 1))
 
@@ -601,49 +452,16 @@ jobs:
           )
 
           if [ "$COUNT" -eq 0 ]; then
-
-            echo "ERROR: Build completed but no APK was found."
-
-            find "$PROJECT" \
-              -type f \
-              -name '*.apk' \
-              -print \
-              || true
-
+            echo "ERROR: No APK generated."
             exit 1
-
           fi
 
           echo
-          echo "Generated APKs:"
-
+          echo "APKs:"
           ls -lh "$OUTPUT"
 
-
       # ============================================================
-      # HASH APK FILES
-      # ============================================================
-
-      - name: APK information
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          for APK in "$GITHUB_WORKSPACE"/apk-output/*.apk
-          do
-
-            echo
-            echo "================================"
-
-            ls -lh "$APK"
-
-            sha256sum "$APK"
-
-          done
-
-
-      # ============================================================
-      # UPLOAD APK
+      # UPLOAD
       # ============================================================
 
       - name: Upload APK
