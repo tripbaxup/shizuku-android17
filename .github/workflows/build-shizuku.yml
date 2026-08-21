@@ -212,17 +212,13 @@ jobs:
           for APK in "$GITHUB_WORKSPACE"/apk-output/*.apk; do
             echo "--------------------------------"
             echo "$APK"
-            sha256sum "$APK"
-          done
-          
- - name: Upload APK artifact
+                  - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Shizuku-Android17-Debug-APK
           path: apk-output/*.apk
           if-no-files-found: error
           retention-days: 30
-          name: Shizuku-Android17-Debug-APK
-          path: apk-output/*.apk
-          if-no-files-found: error
-          retention-days: 30
+            sha256sum "$APK"
+          done
+          
