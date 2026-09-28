@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Arcade Admin Card</string>
+    <string name="hce_service_description">Local arcade administrator card</string>
+    <string name="aid_group_description">Local arcade admin credential</string>
+</resources>
