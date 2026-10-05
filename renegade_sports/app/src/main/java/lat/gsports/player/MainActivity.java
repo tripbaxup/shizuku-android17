@@ -48,6 +48,11 @@ import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
 
+import org.mozilla.geckoview.GeckoResult;
+import org.mozilla.geckoview.GeckoRuntime;
+import org.mozilla.geckoview.GeckoSession;
+import org.mozilla.geckoview.GeckoView;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
@@ -87,6 +92,9 @@ public final class MainActivity extends Activity {
     private WebView apiView;
     private WebView homeView;
     private WebView playerWeb;
+    private GeckoView geckoView;
+    private GeckoSession geckoSession;
+    private static GeckoRuntime geckoRuntime;
     private PlayerView nativePlayerView;
     private ExoPlayer nativePlayer;
     private FrameLayout playerShell;
@@ -279,6 +287,11 @@ public final class MainActivity extends Activity {
             playerWeb.addJavascriptInterface(new LegacyBridge(), "RenegadeBridge");
         }
         playerShell.addView(playerWeb, new FrameLayout.LayoutParams(-1, -1));
+
+        geckoView = new GeckoView(this);
+        geckoView.setBackgroundColor(Color.BLACK);
+        geckoView.setVisibility(View.GONE);
+        playerShell.addView(geckoView, new FrameLayout.LayoutParams(-1, -1));
 
         nativePlayerView = new PlayerView(this);
         nativePlayerView.setBackgroundColor(Color.BLACK);
@@ -567,6 +580,11 @@ public final class MainActivity extends Activity {
         releaseNativePlayer();
         registerBackHandler();
 
+        if (Build.VERSION.SDK_INT <= 27) {
+            openGeckoPlayer(title, url);
+            return;
+        }
+
         playerShell.setVisibility(View.VISIBLE);
         nativePlayerView.setVisibility(View.GONE);
         playerWeb.setVisibility(View.VISIBLE);
@@ -697,6 +715,96 @@ public final class MainActivity extends Activity {
 
         if (Build.VERSION.SDK_INT <= 27) {
             resolveLegacyHtml(url);
+        }
+    }
+
+    private void openGeckoPlayer(String title, String url) {
+        Log.i("RenegadeSports",
+                "Android 8.1: using embedded GeckoView instead of system WebView");
+
+        playerShell.setVisibility(View.VISIBLE);
+        playerWeb.setVisibility(View.GONE);
+        nativePlayerView.setVisibility(View.GONE);
+        geckoView.setVisibility(View.VISIBLE);
+        loading.setVisibility(View.VISIBLE);
+
+        ((TextView) loading.findViewById(android.R.id.message))
+                .setText("Opening Android 8.1 modern player…");
+
+        try {
+            if (geckoSession != null) {
+                geckoSession.close();
+                geckoSession = null;
+            }
+
+            if (geckoRuntime == null) {
+                geckoRuntime = GeckoRuntime.create(getApplicationContext());
+            }
+
+            GeckoSession session = new GeckoSession();
+            geckoSession = session;
+
+            session.setContentDelegate(new GeckoSession.ContentDelegate() {});
+
+            session.setPermissionDelegate(new GeckoSession.PermissionDelegate() {
+                @Override
+                public GeckoResult<Integer> onContentPermissionRequest(
+                        GeckoSession requestedSession,
+                        GeckoSession.PermissionDelegate.ContentPermission perm) {
+                    if (perm.permission ==
+                            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE ||
+                            perm.permission ==
+                            GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE) {
+                        return GeckoResult.fromValue(
+                                GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW);
+                    }
+
+                    return GeckoResult.fromValue(
+                            GeckoSession.PermissionDelegate.ContentPermission.VALUE_PROMPT);
+                }
+            });
+
+            session.setNavigationDelegate(new GeckoSession.NavigationDelegate() {
+                @Override
+                public GeckoResult<GeckoSession> onNewSession(
+                        GeckoSession sourceSession,
+                        String popupUri) {
+                    Log.i("RenegadeSports",
+                            "Blocked Gecko popup: " + popupUri);
+                    return null;
+                }
+            });
+
+            session.setProgressDelegate(new GeckoSession.ProgressDelegate() {
+                @Override
+                public void onPageStart(
+                        GeckoSession loadedSession,
+                        String loadedUrl) {
+                    Log.i("RenegadeSports",
+                            "Gecko page start: " + loadedUrl);
+                }
+
+                @Override
+                public void onPageStop(
+                        GeckoSession loadedSession,
+                        boolean success) {
+                    Log.i("RenegadeSports",
+                            "Gecko page stop success=" + success);
+                    if (playerShell.getVisibility() == View.VISIBLE &&
+                            geckoSession == loadedSession) {
+                        loading.setVisibility(View.GONE);
+                    }
+                }
+            });
+
+            session.open(geckoRuntime);
+            geckoView.setSession(session);
+            session.loadUri(url);
+        } catch (Throwable error) {
+            Log.e("RenegadeSports",
+                    "GeckoView startup failed", error);
+            ((TextView) loading.findViewById(android.R.id.message))
+                    .setText("Android 8.1 browser engine failed to start");
         }
     }
 
@@ -1464,6 +1572,18 @@ public final class MainActivity extends Activity {
         nativePreparing = false;
         releaseNativePlayer();
         nativePlayerView.setVisibility(View.GONE);
+
+        if (geckoSession != null) {
+            try {
+                geckoSession.close();
+            } catch (Throwable ignored) {
+            }
+            geckoSession = null;
+        }
+        if (geckoView != null) {
+            geckoView.setVisibility(View.GONE);
+        }
+
         playerWeb.stopLoading();
         playerWeb.loadUrl("about:blank");
         playerWeb.pauseTimers();
@@ -1496,6 +1616,13 @@ public final class MainActivity extends Activity {
     @Override protected void onDestroy() {
         unregisterBackHandler();
         releaseNativePlayer();
+        if (geckoSession != null) {
+            try {
+                geckoSession.close();
+            } catch (Throwable ignored) {
+            }
+            geckoSession = null;
+        }
         if (apiView != null) apiView.destroy();
         if (homeView != null) homeView.destroy();
         if (playerWeb != null) playerWeb.destroy();
