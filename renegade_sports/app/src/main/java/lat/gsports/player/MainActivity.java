@@ -106,7 +106,7 @@ public final class MainActivity extends Activity {
     private final class LegacyBridge {
         @JavascriptInterface
         public void onStream(String url) {
-            considerLegacyMedia(url, Collections.emptyMap());
+            considerLegacyHlsSource(url);
         }
 
         @JavascriptInterface
@@ -679,6 +679,35 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void considerLegacyHlsSource(String url) {
+        if (Build.VERSION.SDK_INT > 27 || url == null) return;
+
+        String clean = url.replace("\\/", "/").trim();
+        if (clean.isEmpty()) return;
+
+        try {
+            if (clean.startsWith("//")) {
+                clean = "https:" + clean;
+            } else if (!clean.startsWith("http://") &&
+                    !clean.startsWith("https://")) {
+                clean = new URL(
+                        new URL(currentEventUrl == null ? HOME_URL : currentEventUrl),
+                        clean).toString();
+            }
+        } catch (Exception ignored) {
+            return;
+        }
+
+        final String resolved = clean;
+        synchronized (attemptedStreams) {
+            if (attemptedStreams.contains(resolved)) return;
+            attemptedStreams.add(resolved);
+        }
+
+        runOnUiThread(() ->
+                startNativeStream(resolved, Collections.emptyMap()));
+    }
+
     private WebResourceResponse legacyHlsShimResponse() {
         String js =
                 "(function(){" +
@@ -716,9 +745,17 @@ public final class MainActivity extends Activity {
                 "window.Hls=Hls;" +
                 "})();";
 
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Access-Control-Allow-Origin", "*");
+        headers.put("Cache-Control", "no-store");
+        headers.put("Content-Type", "application/javascript; charset=UTF-8");
+
         return new WebResourceResponse(
                 "application/javascript",
                 "UTF-8",
+                200,
+                "OK",
+                headers,
                 new ByteArrayInputStream(js.getBytes()));
     }
 
