@@ -57,6 +57,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -873,13 +874,11 @@ public final class MainActivity extends Activity {
                 reader.close();
 
                 String candidate =
-                        findManifestInText(body.toString(), resourceUrl);
+                        findPlayerSourceInText(body.toString(), resourceUrl);
                 if (candidate != null) {
-                    considerLegacyMedia(
-                            candidate,
-                            requestHeaders == null ?
-                                    Collections.emptyMap() :
-                                    requestHeaders);
+                    Log.i("RenegadeSports",
+                            "Legacy resource source: " + candidate);
+                    considerLegacyHlsSource(candidate);
                 }
             } catch (Exception ignored) {
             } finally {
@@ -911,49 +910,251 @@ public final class MainActivity extends Activity {
 
     private void resolveLegacyHtml(String eventUrl) {
         new Thread(() -> {
-            HttpURLConnection connection = null;
-            try {
-                URL target = new URL(eventUrl);
-                connection = (HttpURLConnection) target.openConnection();
-                connection.setInstanceFollowRedirects(true);
-                connection.setConnectTimeout(10000);
-                connection.setReadTimeout(10000);
-                connection.setRequestProperty("User-Agent",
-                        currentUserAgent == null ?
-                                "Mozilla/5.0 (Linux; Android 8.1) AppleWebKit/537.36 Chrome/67 Mobile Safari/537.36" :
-                                currentUserAgent);
-                connection.setRequestProperty("Accept",
-                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-                connection.setRequestProperty("Referer", HOME_URL);
+            Set<String> visited = new LinkedHashSet<>();
+            boolean found = crawlLegacyResource(eventUrl, 0, visited);
 
-                String cookie = CookieManager.getInstance().getCookie(eventUrl);
-                if (cookie != null && !cookie.isEmpty()) {
-                    connection.setRequestProperty("Cookie", cookie);
-                }
-
-                BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(connection.getInputStream()));
-                StringBuilder html = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null &&
-                        html.length() < 2_000_000) {
-                    html.append(line).append('\n');
-                }
-                reader.close();
-
-                String candidate = findManifestInText(html.toString(), eventUrl);
-                if (candidate != null) {
-                    considerLegacyMedia(candidate, Collections.emptyMap());
-                }
-            } catch (Exception ignored) {
-            } finally {
-                if (connection != null) connection.disconnect();
+            if (!found) {
+                Log.w("RenegadeSports",
+                        "Native legacy resolver exhausted " +
+                                visited.size() + " resource(s) without a stream");
+                handler.post(() -> {
+                    if (Build.VERSION.SDK_INT <= 27 &&
+                            playerShell.getVisibility() == View.VISIBLE &&
+                            !nativePreparing) {
+                        ((TextView) loading.findViewById(android.R.id.message))
+                                .setText("Legacy player config not found yet…");
+                    }
+                });
             }
-        }, "renegade-legacy-resolver").start();
+        }, "renegade-native-crawler").start();
     }
 
-    private String findManifestInText(String raw, String baseUrl) {
+    private boolean crawlLegacyResource(
+            String resourceUrl,
+            int depth,
+            Set<String> visited) {
+        if (Build.VERSION.SDK_INT > 27 ||
+                resourceUrl == null ||
+                depth > 3 ||
+                visited.size() >= 28) {
+            return false;
+        }
+
+        String resolved = resolveLegacyUrl(
+                resourceUrl,
+                currentEventUrl == null ? HOME_URL : currentEventUrl);
+        if (resolved == null || visited.contains(resolved)) return false;
+        if (!shouldFollowLegacyUrl(resolved, depth)) return false;
+
+        visited.add(resolved);
+
+        String body = fetchLegacyText(resolved);
+        if (body == null || body.isEmpty()) return false;
+
+        Log.i("RenegadeSports",
+                "Native resolver scanned depth=" + depth +
+                        " bytes=" + body.length() +
+                        " url=" + resolved);
+
+        String media = findPlayerSourceInText(body, resolved);
+        if (media != null) {
+            Log.i("RenegadeSports",
+                    "Native resolver found stream: " + media);
+            considerLegacyHlsSource(media);
+            return true;
+        }
+
+        List<String> links = extractLegacyFollowLinks(body, resolved);
+        int followed = 0;
+
+        for (String link : links) {
+            if (followed >= 12) break;
+            if (crawlLegacyResource(link, depth + 1, visited)) {
+                return true;
+            }
+            followed++;
+        }
+
+        return false;
+    }
+
+    private String fetchLegacyText(String resourceUrl) {
+        HttpURLConnection connection = null;
+        try {
+            URL target = new URL(resourceUrl);
+            connection = (HttpURLConnection) target.openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(9000);
+            connection.setReadTimeout(9000);
+            connection.setRequestProperty(
+                    "User-Agent",
+                    currentUserAgent == null ?
+                            "Mozilla/5.0 (Linux; Android 8.1) AppleWebKit/537.36 Chrome/79 Mobile Safari/537.36" :
+                            currentUserAgent);
+            connection.setRequestProperty(
+                    "Accept",
+                    "text/html,application/json,text/javascript,application/javascript,application/xml,text/plain,*/*;q=0.8");
+
+            if (currentEventUrl != null) {
+                connection.setRequestProperty("Referer", currentEventUrl);
+            }
+
+            String cookie =
+                    CookieManager.getInstance().getCookie(resourceUrl);
+            if (cookie != null && !cookie.isEmpty()) {
+                connection.setRequestProperty("Cookie", cookie);
+            }
+
+            int response = connection.getResponseCode();
+            if (response < 200 || response >= 400) {
+                Log.w("RenegadeSports",
+                        "Native resolver HTTP " + response +
+                                " for " + resourceUrl);
+                return null;
+            }
+
+            String contentType = connection.getContentType();
+            if (contentType != null) {
+                String ct = contentType.toLowerCase(Locale.US);
+                if (ct.startsWith("image/") ||
+                        ct.startsWith("video/") ||
+                        ct.startsWith("audio/") ||
+                        ct.contains("font") ||
+                        ct.contains("octet-stream")) {
+                    return null;
+                }
+            }
+
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(connection.getInputStream()));
+            StringBuilder text = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null &&
+                    text.length() < 2_500_000) {
+                text.append(line).append('\n');
+            }
+            reader.close();
+            return text.toString();
+        } catch (Exception e) {
+            Log.w("RenegadeSports",
+                    "Native resolver fetch failed for " + resourceUrl +
+                            ": " + e.getClass().getSimpleName() +
+                            " " + e.getMessage());
+            return null;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private String findPlayerSourceInText(String raw, String baseUrl) {
+        return findPlayerSourceInText(raw, baseUrl, 0);
+    }
+
+    private String findPlayerSourceInText(
+            String raw,
+            String baseUrl,
+            int decodeDepth) {
         if (raw == null) return null;
+
+        String text = raw
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+                .replace("\\u003d", "=")
+                .replace("\\u002F", "/")
+                .replace("\\u003A", ":")
+                .replace("&amp;", "&");
+
+        Pattern absoluteManifest = Pattern.compile(
+                "https?://[^\\\"'<>\\s]+?\\.(?:m3u8|mpd)(?:\\?[^\\\"'<>\\s]*)?",
+                Pattern.CASE_INSENSITIVE);
+        Matcher absoluteMatcher = absoluteManifest.matcher(text);
+        if (absoluteMatcher.find()) return absoluteMatcher.group();
+
+        Pattern relativeManifest = Pattern.compile(
+                "[\\\"']([^\\\"']+\\.(?:m3u8|mpd)(?:\\?[^\\\"']*)?)[\\\"']",
+                Pattern.CASE_INSENSITIVE);
+        Matcher relativeMatcher = relativeManifest.matcher(text);
+        if (relativeMatcher.find()) {
+            String resolved = resolveLegacyUrl(
+                    relativeMatcher.group(1),
+                    baseUrl);
+            if (resolved != null) return resolved;
+        }
+
+        String[] playerPatterns = new String[]{
+                "(?is)loadSource\\s*\\(\\s*[\\\"']([^\\\"']+)[\\\"']",
+                "(?is)(?:streamUrl|stream_url|hlsUrl|hls_url|playlistUrl|playlist_url|manifestUrl|manifest_url)\\s*[:=]\\s*[\\\"']([^\\\"']+)[\\\"']",
+                "(?is)(?:stream|playlist|source|file)\\s*[:=]\\s*[\\\"']([^\\\"']+)[\\\"']"
+        };
+
+        for (String expression : playerPatterns) {
+            Matcher matcher = Pattern.compile(expression).matcher(text);
+            while (matcher.find()) {
+                String resolved =
+                        resolveLegacyUrl(matcher.group(1), baseUrl);
+                if (looksLikeLegacyMediaSource(resolved)) {
+                    return resolved;
+                }
+            }
+        }
+
+        if (decodeDepth < 2) {
+            Pattern base64Pattern = Pattern.compile(
+                    "(?:atob\\s*\\(\\s*[\\\"']|base64,)([A-Za-z0-9+/=]{24,})",
+                    Pattern.CASE_INSENSITIVE);
+            Matcher base64Matcher = base64Pattern.matcher(text);
+
+            int decoded = 0;
+            while (base64Matcher.find() && decoded < 8) {
+                try {
+                    byte[] bytes = Base64.decode(
+                            base64Matcher.group(1),
+                            Base64.DEFAULT);
+                    String nested = new String(bytes);
+                    String candidate =
+                            findPlayerSourceInText(
+                                    nested,
+                                    baseUrl,
+                                    decodeDepth + 1);
+                    if (candidate != null) return candidate;
+                } catch (Exception ignored) {
+                }
+                decoded++;
+            }
+        }
+
+        return null;
+    }
+
+    private boolean looksLikeLegacyMediaSource(String url) {
+        if (url == null || url.isEmpty()) return false;
+
+        String lower = url.toLowerCase(Locale.US);
+
+        if (lower.endsWith(".js") ||
+                lower.contains(".js?") ||
+                lower.endsWith(".css") ||
+                lower.contains(".css?") ||
+                lower.matches(".*\\.(png|jpg|jpeg|gif|svg|webp|woff2?|ttf)(\\?.*)?$")) {
+            return false;
+        }
+
+        return lower.contains(".m3u8") ||
+                lower.contains(".mpd") ||
+                lower.contains("/stream") ||
+                lower.contains("stream=") ||
+                lower.contains("/live") ||
+                lower.contains("playlist") ||
+                lower.contains("manifest") ||
+                lower.contains("/hls") ||
+                lower.contains("master.");
+    }
+
+    private List<String> extractLegacyFollowLinks(
+            String raw,
+            String baseUrl) {
+        LinkedHashSet<String> links = new LinkedHashSet<>();
+        if (raw == null) return new ArrayList<>(links);
 
         String text = raw
                 .replace("\\/", "/")
@@ -961,23 +1162,113 @@ public final class MainActivity extends Activity {
                 .replace("\\u003d", "=")
                 .replace("&amp;", "&");
 
-        Pattern absolute = Pattern.compile(
-                "https?://[^\\\"'<>\\s]+?\\.(?:m3u8|mpd)(?:\\?[^\\\"'<>\\s]*)?",
-                Pattern.CASE_INSENSITIVE);
-        Matcher m = absolute.matcher(text);
-        if (m.find()) return m.group();
+        String[] expressions = new String[]{
+                "(?is)<script[^>]+src\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
+                "(?is)(?:fetch|axios\\.get)\\s*\\(\\s*[\\\"']([^\\\"']+)[\\\"']",
+                "(?is)\\.open\\s*\\(\\s*[\\\"']GET[\\\"']\\s*,\\s*[\\\"']([^\\\"']+)[\\\"']",
+                "(?is)(?:configUrl|config_url|apiUrl|api_url|playerUrl|player_url)\\s*[:=]\\s*[\\\"']([^\\\"']+)[\\\"']"
+        };
 
-        Pattern relative = Pattern.compile(
-                "[\\\"']([^\\\"']+\\.(?:m3u8|mpd)(?:\\?[^\\\"']*)?)[\\\"']",
-                Pattern.CASE_INSENSITIVE);
-        Matcher r = relative.matcher(text);
-        if (r.find()) {
-            try {
-                return new URL(new URL(baseUrl), r.group(1)).toString();
-            } catch (Exception ignored) {
+        for (String expression : expressions) {
+            Matcher matcher = Pattern.compile(expression).matcher(text);
+            while (matcher.find() && links.size() < 24) {
+                String resolved =
+                        resolveLegacyUrl(matcher.group(1), baseUrl);
+                if (resolved != null) links.add(resolved);
             }
         }
-        return null;
+
+        Pattern absoluteKeywordUrl = Pattern.compile(
+                "https?://[^\\\"'<>\\s]+",
+                Pattern.CASE_INSENSITIVE);
+        Matcher absoluteMatcher = absoluteKeywordUrl.matcher(text);
+        while (absoluteMatcher.find() && links.size() < 24) {
+            String candidate = absoluteMatcher.group();
+            String lower = candidate.toLowerCase(Locale.US);
+            if (lower.contains("api") ||
+                    lower.contains("player") ||
+                    lower.contains("stream") ||
+                    lower.contains("config") ||
+                    lower.contains("source") ||
+                    lower.contains("playlist")) {
+                links.add(candidate);
+            }
+        }
+
+        return new ArrayList<>(links);
+    }
+
+    private String resolveLegacyUrl(String value, String baseUrl) {
+        if (value == null) return null;
+
+        String clean = value.trim()
+                .replace("\\/", "/")
+                .replace("&amp;", "&");
+
+        if (clean.isEmpty() ||
+                clean.startsWith("javascript:") ||
+                clean.startsWith("data:") ||
+                clean.startsWith("blob:") ||
+                clean.startsWith("#")) {
+            return null;
+        }
+
+        try {
+            if (clean.startsWith("//")) {
+                return "https:" + clean;
+            }
+            if (clean.startsWith("http://") ||
+                    clean.startsWith("https://")) {
+                return clean;
+            }
+            return new URL(
+                    new URL(baseUrl == null ? HOME_URL : baseUrl),
+                    clean).toString();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean shouldFollowLegacyUrl(
+            String url,
+            int depth) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+
+        if (lower.contains("sharethis") ||
+                lower.contains("adsco.re") ||
+                lower.contains("adscore") ||
+                lower.contains("simpli.fi") ||
+                lower.contains("crwdcntrl") ||
+                lower.contains("lijit") ||
+                lower.contains("intentiq") ||
+                lower.contains("doubleclick") ||
+                lower.contains("googlesyndication") ||
+                lower.contains("google-analytics") ||
+                lower.contains("facebook") ||
+                lower.contains("hls.js")) {
+            return false;
+        }
+
+        if (looksLikeLegacyMediaSource(url)) return true;
+
+        try {
+            String host = new URL(url).getHost();
+            if (host != null &&
+                    (host.equalsIgnoreCase("gsports.lat") ||
+                            host.endsWith(".gsports.lat"))) {
+                return true;
+            }
+        } catch (Exception ignored) {
+        }
+
+        if (depth == 0) return true;
+
+        return lower.contains("api") ||
+                lower.contains("player") ||
+                lower.contains("config") ||
+                lower.contains("stream") ||
+                lower.contains("source");
     }
 
     private void scanLegacyPage() {
