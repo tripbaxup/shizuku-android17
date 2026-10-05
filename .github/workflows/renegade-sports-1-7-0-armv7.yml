@@ -1,0 +1,36 @@
+name: Renegade Sports 1.7.0 ARMv7 Build
+
+on:
+  push:
+    branches:
+      - renegade-sports-1-7-0-armv7
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android CLI and API 37.2
+        run: |
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          export PATH="$HOME/.android/bin:$HOME/bin:$PATH"
+          ANDROID_BIN="$(command -v android || find "$HOME" -type f -name android -perm -111 2>/dev/null | head -n1)"
+          "$ANDROID_BIN" --sdk="$ANDROID_HOME" sdk install --beta platforms/android-37.2 build-tools/36.0.0
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.1'
+      - name: Build ARMv7 APK
+        working-directory: renegade_sports
+        run: gradle --stacktrace assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RenegadeSports-1.7.0-armv7-debug
+          path: renegade_sports/app/build/outputs/apk/debug/app-debug.apk
