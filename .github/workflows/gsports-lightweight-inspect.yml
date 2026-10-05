@@ -1,0 +1,30 @@
+name: GSports lightweight inspect
+
+on:
+  push:
+    branches:
+      - gsports-lightweight-inspect
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch event HTML
+        run: |
+          python3 - <<'PY'
+          import urllib.request
+          url='https://gsports.lat/event/atlanta-falcons-vs-new-orleans-saints/'
+          req=urllib.request.Request(url, headers={
+              'User-Agent':'Mozilla/5.0 (Linux; Android 8.1; Tablet) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.93 Safari/537.36',
+              'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          })
+          with urllib.request.urlopen(req, timeout=30) as r:
+              data=r.read()
+          open('event.html','wb').write(data)
+          print('bytes', len(data))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gsports-event-html
+          path: event.html
