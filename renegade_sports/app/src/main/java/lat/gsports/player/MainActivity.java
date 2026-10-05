@@ -10,11 +10,13 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.webkit.ConsoleMessage;
 import android.webkit.CookieManager;
 import android.webkit.JsResult;
 import android.webkit.JavascriptInterface;
@@ -106,12 +108,13 @@ public final class MainActivity extends Activity {
     private final class LegacyBridge {
         @JavascriptInterface
         public void onStream(String url) {
+            Log.i("RenegadeSports", "Legacy bridge stream: " + url);
             considerLegacyHlsSource(url);
         }
 
         @JavascriptInterface
         public void onLog(String message) {
-            // Intentionally no-op. Kept for compatibility diagnostics.
+            Log.i("RenegadeSports", "Legacy bridge: " + message);
         }
     }
 
@@ -591,6 +594,14 @@ public final class MainActivity extends Activity {
         playerWeb.setDownloadListener((u, ua, cd, mt, len) -> {});
 
         playerWeb.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onConsoleMessage(ConsoleMessage message) {
+                if (message != null) {
+                    Log.i("RenegadeSports",
+                            "WEB " + message.messageLevel() + ": " + message.message());
+                }
+                return super.onConsoleMessage(message);
+            }
+
             @Override public boolean onCreateWindow(
                     WebView view, boolean dialog, boolean gesture,
                     android.os.Message resultMsg) {
@@ -627,6 +638,10 @@ public final class MainActivity extends Activity {
                     String lower = requestUrl.toLowerCase(Locale.US);
 
                     if (lower.contains("hls.js")) {
+                        handler.post(() ->
+                                ((TextView) loading.findViewById(android.R.id.message))
+                                        .setText("Loading Android 8.1 compatibility player…"));
+                        Log.i("RenegadeSports", "Serving bundled legacy hls.js for " + requestUrl);
                         return legacyHlsShimResponse();
                     }
 
@@ -709,41 +724,57 @@ public final class MainActivity extends Activity {
     }
 
     private WebResourceResponse legacyHlsShimResponse() {
-        String js =
-                "(function(){" +
-                "if(window.__renegadeHlsShim)return;window.__renegadeHlsShim=true;" +
-                "function Hls(cfg){this.config=cfg||{};this.media=null;this.url='';this.listeners={};" +
-                "this.levels=[];this.audioTracks=[];this.subtitleTracks=[];this.currentLevel=-1;" +
-                "this.nextLevel=-1;this.loadLevel=-1;this.startLevel=-1;this.autoLevelEnabled=true;" +
-                "this.bandwidthEstimate=0;this.latency=0;}" +
-                "Hls.version='1.6.0-renegade-native-bridge';" +
-                "Hls.isSupported=function(){return true;};" +
-                "Hls.isMSESupported=function(){return true;};" +
-                "Hls.DefaultConfig={};" +
-                "Hls.Events={" +
-                "MEDIA_ATTACHING:'hlsMediaAttaching',MEDIA_ATTACHED:'hlsMediaAttached'," +
-                "MEDIA_DETACHING:'hlsMediaDetaching',MEDIA_DETACHED:'hlsMediaDetached'," +
-                "MANIFEST_LOADING:'hlsManifestLoading',MANIFEST_LOADED:'hlsManifestLoaded'," +
-                "MANIFEST_PARSED:'hlsManifestParsed',LEVEL_LOADING:'hlsLevelLoading'," +
-                "LEVEL_LOADED:'hlsLevelLoaded',LEVEL_SWITCHED:'hlsLevelSwitched'," +
-                "FRAG_LOADING:'hlsFragLoading',FRAG_LOADED:'hlsFragLoaded'," +
-                "BUFFER_APPENDING:'hlsBufferAppending',BUFFER_APPENDED:'hlsBufferAppended'," +
-                "ERROR:'hlsError',DESTROYING:'hlsDestroying'};" +
-                "Hls.ErrorTypes={NETWORK_ERROR:'networkError',MEDIA_ERROR:'mediaError',OTHER_ERROR:'otherError'};" +
-                "Hls.ErrorDetails={};" +
-                "Hls.prototype.on=function(e,cb){(this.listeners[e]||(this.listeners[e]=[])).push(cb);return this;};" +
-                "Hls.prototype.once=function(e,cb){var self=this;var w=function(ev,d){self.off(e,w);cb(ev,d);};return this.on(e,w);};" +
-                "Hls.prototype.off=function(e,cb){var a=this.listeners[e]||[];this.listeners[e]=a.filter(function(x){return x!==cb;});return this;};" +
-                "Hls.prototype._emit=function(e,d){var a=(this.listeners[e]||[]).slice();for(var i=0;i<a.length;i++){try{a[i](e,d||{});}catch(x){}}};" +
-                "Hls.prototype.attachMedia=function(m){this.media=m;var s=this;setTimeout(function(){s._emit(Hls.Events.MEDIA_ATTACHED,{media:m});},0);};" +
-                "Hls.prototype.detachMedia=function(){this._emit(Hls.Events.MEDIA_DETACHING,{});this.media=null;this._emit(Hls.Events.MEDIA_DETACHED,{});};" +
-                "Hls.prototype.loadSource=function(u){this.url=String(u||'');try{if(window.RenegadeBridge)RenegadeBridge.onStream(this.url);}catch(e){}" +
-                "var s=this;setTimeout(function(){s._emit(Hls.Events.MANIFEST_LOADING,{url:s.url});s._emit(Hls.Events.MANIFEST_LOADED,{url:s.url,levels:[]});s._emit(Hls.Events.MANIFEST_PARSED,{levels:[]});},0);};" +
-                "Hls.prototype.startLoad=function(){};Hls.prototype.stopLoad=function(){};" +
-                "Hls.prototype.recoverMediaError=function(){};Hls.prototype.swapAudioCodec=function(){};" +
-                "Hls.prototype.destroy=function(){this._emit(Hls.Events.DESTROYING,{});this.listeners={};this.media=null;};" +
-                "window.Hls=Hls;" +
-                "})();";
+        StringBuilder js = new StringBuilder();
+        try {
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(
+                            getAssets().open("hls-0.14.17.min.js")));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                js.append(line).append('\n');
+            }
+            reader.close();
+
+            js.append(
+                    ";(function(){" +
+                    "try{" +
+                    "if(!window.Hls||!Hls.prototype)return;" +
+                    "if(Hls.prototype.__renegadeWrapped)return;" +
+                    "var original=Hls.prototype.loadSource;" +
+                    "Hls.prototype.loadSource=function(u){" +
+                    "try{if(window.RenegadeBridge){" +
+                    "RenegadeBridge.onLog('Hls.loadSource '+String(u));" +
+                    "RenegadeBridge.onStream(String(u));" +
+                    "}}catch(e){}" +
+                    "return original.apply(this,arguments);" +
+                    "};" +
+                    "Hls.prototype.__renegadeWrapped=true;" +
+                    "try{if(window.RenegadeBridge)" +
+                    "RenegadeBridge.onLog('legacy hls.js 0.14.17 loaded');}catch(e){}" +
+                    "}catch(e){" +
+                    "try{if(window.RenegadeBridge)" +
+                    "RenegadeBridge.onLog('legacy hls patch failed: '+e);}catch(x){}" +
+                    "}" +
+                    "})();");
+        } catch (Exception e) {
+            Log.e("RenegadeSports", "Could not load bundled legacy hls.js", e);
+
+            js.setLength(0);
+            js.append(
+                    "(function(){" +
+                    "function Hls(){};" +
+                    "Hls.isSupported=function(){return true;};" +
+                    "Hls.Events={MEDIA_ATTACHED:'hlsMediaAttached'," +
+                    "MANIFEST_PARSED:'hlsManifestParsed',ERROR:'hlsError'};" +
+                    "Hls.prototype.on=function(){return this;};" +
+                    "Hls.prototype.attachMedia=function(){};" +
+                    "Hls.prototype.loadSource=function(u){" +
+                    "try{if(window.RenegadeBridge)" +
+                    "RenegadeBridge.onStream(String(u));}catch(e){}" +
+                    "};" +
+                    "window.Hls=Hls;" +
+                    "})();");
+        }
 
         Map<String, String> headers = new HashMap<>();
         headers.put("Access-Control-Allow-Origin", "*");
@@ -756,7 +787,7 @@ public final class MainActivity extends Activity {
                 200,
                 "OK",
                 headers,
-                new ByteArrayInputStream(js.getBytes()));
+                new ByteArrayInputStream(js.toString().getBytes()));
     }
 
     private boolean shouldProbeLegacyResource(String url) {
@@ -1033,6 +1064,11 @@ public final class MainActivity extends Activity {
             }
 
             @Override public void onPlayerError(PlaybackException error) {
+                Log.e("RenegadeSports",
+                        "Native player error: " +
+                                (error == null ? "unknown" :
+                                        error.errorCodeName + " " + error.getMessage()),
+                        error);
                 handler.post(() -> {
                     nativePreparing = false;
                     releaseNativePlayer();
