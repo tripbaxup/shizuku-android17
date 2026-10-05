@@ -2,7 +2,11 @@ plugins { id 'com.android.application' }
 
 android {
     namespace 'lat.gsports.player'
-    compileSdk 37
+    compileSdk {
+        version = release(37) {
+            it.minorApiLevel = 2
+        }
+    }
     defaultConfig {
         applicationId 'lat.gsports.player'
         minSdk 27
