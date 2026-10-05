@@ -23,5 +23,5 @@ dependencies {
     implementation 'androidx.media3:media3-ui:1.11.1'
 
     // Modern embedded browser engine used only on Android 8.1 at runtime.
-    implementation 'org.mozilla.geckoview:geckoview-nightly:159.0.20261002093838'
+    implementation 'org.mozilla.geckoview:geckoview-nightly-omni:159.0.20260924164300'
 }
