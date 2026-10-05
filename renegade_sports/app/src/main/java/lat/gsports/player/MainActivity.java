@@ -10,6 +10,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -52,9 +53,11 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -597,7 +600,9 @@ public final class MainActivity extends Activity {
             @Override public boolean onConsoleMessage(ConsoleMessage message) {
                 if (message != null) {
                     Log.i("RenegadeSports",
-                            "WEB " + message.messageLevel() + ": " + message.message());
+                            "WEB " + message.messageLevel() + " " +
+                                    message.sourceId() + ":" + message.lineNumber() +
+                                    " :: " + message.message());
                 }
                 return super.onConsoleMessage(message);
             }
