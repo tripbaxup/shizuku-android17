@@ -1,9 +1,9 @@
-name: Temporary Renegade Sports 1.3.0 macOS Build
+name: Temporary Renegade Sports 1.4.0 macOS Build
 
 on:
   push:
     branches:
-      - renegade-sports-1-3-0-temp
+      - renegade-sports-1-4-0-temp
 
 jobs:
   build:
@@ -39,5 +39,5 @@ jobs:
         run: gradle --stacktrace assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: RenegadeSports-1.3.0-debug-macos
+          name: RenegadeSports-1.4.0-debug-macos
           path: renegade_sports/app/build/outputs/apk/debug/app-debug.apk
