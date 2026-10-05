@@ -50,6 +50,8 @@ import androidx.media3.ui.PlayerView;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -64,6 +66,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 public final class MainActivity extends Activity {
     private static final String API_URL = "https://gsports.lat/?api";
@@ -567,6 +571,11 @@ public final class MainActivity extends Activity {
         releaseNativePlayer();
         registerBackHandler();
 
+        if (Build.VERSION.SDK_INT <= 27) {
+            openLightweightLegacyPlayer(title, url);
+            return;
+        }
+
         playerShell.setVisibility(View.VISIBLE);
         nativePlayerView.setVisibility(View.GONE);
         playerWeb.setVisibility(View.VISIBLE);
@@ -697,6 +706,157 @@ public final class MainActivity extends Activity {
 
         if (Build.VERSION.SDK_INT <= 27) {
             resolveLegacyHtml(url);
+        }
+    }
+
+    private void openLightweightLegacyPlayer(String title, String url) {
+        playerShell.setVisibility(View.VISIBLE);
+        playerWeb.setVisibility(View.GONE);
+        nativePlayerView.setVisibility(View.GONE);
+        loading.setVisibility(View.VISIBLE);
+
+        currentUserAgent =
+                "Mozilla/5.0 (Linux; Android 8.1; Tablet) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/79.0.3945.93 Safari/537.36";
+
+        ((TextView) loading.findViewById(android.R.id.message))
+                .setText("Preparing Android 8.1 stream…");
+
+        Log.i("RenegadeSports",
+                "Android 8.1 lightweight resolver starting for " + url);
+
+        new Thread(() -> decodeEventBootstrap(url),
+                "renegade-bootstrap-decoder").start();
+    }
+
+    private void decodeEventBootstrap(String eventUrl) {
+        HttpURLConnection connection = null;
+
+        try {
+            String payloadUrl =
+                    eventUrl + (eventUrl.contains("?") ? "&" : "?") +
+                            "v=font.woff2";
+
+            connection =
+                    (HttpURLConnection) new URL(payloadUrl).openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(10000);
+            connection.setRequestProperty("User-Agent", currentUserAgent);
+            connection.setRequestProperty("Referer", eventUrl);
+            connection.setRequestProperty("Accept", "*/*");
+
+            String eventCookie =
+                    CookieManager.getInstance().getCookie(eventUrl);
+            if (eventCookie != null && !eventCookie.isEmpty()) {
+                connection.setRequestProperty("Cookie", eventCookie);
+            }
+
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 400) {
+                throw new IllegalStateException(
+                        "bootstrap HTTP " + code);
+            }
+
+            ByteArrayOutputStream encryptedOut =
+                    new ByteArrayOutputStream();
+            InputStream networkIn = connection.getInputStream();
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = networkIn.read(buffer)) != -1) {
+                encryptedOut.write(buffer, 0, count);
+            }
+            networkIn.close();
+
+            byte[] encrypted = encryptedOut.toByteArray();
+            byte[] key = new byte[]{'g', 's', '9', '9'};
+
+            for (int i = 0; i < encrypted.length; i++) {
+                encrypted[i] =
+                        (byte) (encrypted[i] ^ key[i % key.length]);
+            }
+
+            Inflater inflater = new Inflater(true);
+            InflaterInputStream inflateIn =
+                    new InflaterInputStream(
+                            new ByteArrayInputStream(encrypted),
+                            inflater);
+            ByteArrayOutputStream decodedOut =
+                    new ByteArrayOutputStream();
+
+            while ((count = inflateIn.read(buffer)) != -1) {
+                decodedOut.write(buffer, 0, count);
+            }
+
+            inflateIn.close();
+            inflater.end();
+
+            String decoded =
+                    new String(decodedOut.toByteArray(), "UTF-8");
+
+            Log.i("RenegadeSports",
+                    "Decoded Android 8.1 player payload, chars=" +
+                            decoded.length());
+
+            Matcher sourceMatcher = Pattern.compile(
+                    "(?is)\\bsource\\s*:\\s*['\\\"]([^'\\\"]+)['\\\"]")
+                    .matcher(decoded);
+
+            if (!sourceMatcher.find()) {
+                sourceMatcher = Pattern.compile(
+                        "(?is)\\b(?:file|stream|playlist)\\s*:\\s*['\\\"]([^'\\\"]+)['\\\"]")
+                        .matcher(decoded);
+            }
+
+            if (!sourceMatcher.find(0)) {
+                throw new IllegalStateException(
+                        "stream source not present in decoded payload");
+            }
+
+            String streamUrl =
+                    sourceMatcher.group(1)
+                            .replace("\\/", "/")
+                            .replace("&amp;", "&")
+                            .trim();
+
+            if (streamUrl.startsWith("//")) {
+                streamUrl = "https:" + streamUrl;
+            } else if (!streamUrl.startsWith("http://") &&
+                    !streamUrl.startsWith("https://")) {
+                streamUrl =
+                        new URL(new URL(eventUrl), streamUrl).toString();
+            }
+
+            final String finalStreamUrl = streamUrl;
+
+            Log.i("RenegadeSports",
+                    "Decoded Android 8.1 stream source: " +
+                            finalStreamUrl);
+
+            handler.post(() -> {
+                if (playerShell.getVisibility() == View.VISIBLE &&
+                        currentEventUrl != null &&
+                        currentEventUrl.equals(eventUrl)) {
+                    startNativeStream(
+                            finalStreamUrl,
+                            Collections.emptyMap());
+                }
+            });
+        } catch (Exception error) {
+            Log.e("RenegadeSports",
+                    "Android 8.1 bootstrap decode failed", error);
+
+            handler.post(() -> {
+                if (playerShell.getVisibility() == View.VISIBLE) {
+                    ((TextView) loading.findViewById(android.R.id.message))
+                            .setText("Could not decode this stream");
+                }
+            });
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -1310,6 +1470,9 @@ public final class MainActivity extends Activity {
             headers.put("User-Agent", currentUserAgent);
         }
         if (currentEventUrl != null) headers.put("Referer", currentEventUrl);
+        if (Build.VERSION.SDK_INT <= 27) {
+            headers.put("Origin", "https://gsports.lat");
+        }
         headers.put("Accept", "*/*");
 
         String cookie = CookieManager.getInstance().getCookie(streamUrl);
