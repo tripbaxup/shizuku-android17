@@ -23,7 +23,7 @@ jobs:
           curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
           export PATH="$HOME/.android/bin:$HOME/bin:$PATH"
           ANDROID_BIN="$(command -v android || find "$HOME" -type f -name android -perm -111 2>/dev/null | head -n1)"
-          "$ANDROID_BIN" --sdk="$ANDROID_HOME" sdk install platforms/android-37 build-tools/36.0.0
+          "$ANDROID_BIN" --sdk="$ANDROID_HOME" sdk install --beta platforms/android-37.2 build-tools/36.0.0
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.1'
