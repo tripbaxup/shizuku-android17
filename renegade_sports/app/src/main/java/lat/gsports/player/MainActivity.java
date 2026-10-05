@@ -17,6 +17,7 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.JsResult;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -45,6 +46,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -99,6 +101,18 @@ public final class MainActivity extends Activity {
     private static final class Meta {
         String time = "";
         String channel = "";
+    }
+
+    private final class LegacyBridge {
+        @JavascriptInterface
+        public void onStream(String url) {
+            considerLegacyMedia(url, Collections.emptyMap());
+        }
+
+        @JavascriptInterface
+        public void onLog(String message) {
+            // Intentionally no-op. Kept for compatibility diagnostics.
+        }
     }
 
     @Override public void onCreate(Bundle state) {
@@ -254,6 +268,9 @@ public final class MainActivity extends Activity {
 
         playerWeb = new WebView(this);
         playerWeb.setBackgroundColor(Color.BLACK);
+        if (Build.VERSION.SDK_INT <= 27) {
+            playerWeb.addJavascriptInterface(new LegacyBridge(), "RenegadeBridge");
+        }
         playerShell.addView(playerWeb, new FrameLayout.LayoutParams(-1, -1));
 
         nativePlayerView = new PlayerView(this);
@@ -545,7 +562,10 @@ public final class MainActivity extends Activity {
 
         playerShell.setVisibility(View.VISIBLE);
         nativePlayerView.setVisibility(View.GONE);
-        playerWeb.setVisibility(Build.VERSION.SDK_INT <= 27 ? View.INVISIBLE : View.VISIBLE);
+        playerWeb.setVisibility(View.VISIBLE);
+        playerWeb.setAlpha(1f);
+        playerWeb.onResume();
+        playerWeb.resumeTimers();
         loading.setVisibility(View.VISIBLE);
         ((TextView) loading.findViewById(android.R.id.message))
                 .setText("Opening “" + title + "”…");
@@ -603,9 +623,22 @@ public final class MainActivity extends Activity {
                     WebView view, WebResourceRequest request) {
                 if (Build.VERSION.SDK_INT <= 27 && request != null &&
                         request.getUrl() != null) {
+                    String requestUrl = request.getUrl().toString();
+                    String lower = requestUrl.toLowerCase(Locale.US);
+
+                    if (lower.contains("hls.js")) {
+                        return legacyHlsShimResponse();
+                    }
+
                     considerLegacyMedia(
-                            request.getUrl().toString(),
+                            requestUrl,
                             request.getRequestHeaders());
+
+                    if (shouldProbeLegacyResource(requestUrl)) {
+                        probeLegacyResource(
+                                requestUrl,
+                                request.getRequestHeaders());
+                    }
                 }
                 return super.shouldInterceptRequest(view, request);
             }
@@ -644,6 +677,142 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT <= 27) {
             resolveLegacyHtml(url);
         }
+    }
+
+    private WebResourceResponse legacyHlsShimResponse() {
+        String js =
+                "(function(){" +
+                "if(window.__renegadeHlsShim)return;window.__renegadeHlsShim=true;" +
+                "function Hls(cfg){this.config=cfg||{};this.media=null;this.url='';this.listeners={};" +
+                "this.levels=[];this.audioTracks=[];this.subtitleTracks=[];this.currentLevel=-1;" +
+                "this.nextLevel=-1;this.loadLevel=-1;this.startLevel=-1;this.autoLevelEnabled=true;" +
+                "this.bandwidthEstimate=0;this.latency=0;}" +
+                "Hls.version='1.6.0-renegade-native-bridge';" +
+                "Hls.isSupported=function(){return true;};" +
+                "Hls.isMSESupported=function(){return true;};" +
+                "Hls.DefaultConfig={};" +
+                "Hls.Events={" +
+                "MEDIA_ATTACHING:'hlsMediaAttaching',MEDIA_ATTACHED:'hlsMediaAttached'," +
+                "MEDIA_DETACHING:'hlsMediaDetaching',MEDIA_DETACHED:'hlsMediaDetached'," +
+                "MANIFEST_LOADING:'hlsManifestLoading',MANIFEST_LOADED:'hlsManifestLoaded'," +
+                "MANIFEST_PARSED:'hlsManifestParsed',LEVEL_LOADING:'hlsLevelLoading'," +
+                "LEVEL_LOADED:'hlsLevelLoaded',LEVEL_SWITCHED:'hlsLevelSwitched'," +
+                "FRAG_LOADING:'hlsFragLoading',FRAG_LOADED:'hlsFragLoaded'," +
+                "BUFFER_APPENDING:'hlsBufferAppending',BUFFER_APPENDED:'hlsBufferAppended'," +
+                "ERROR:'hlsError',DESTROYING:'hlsDestroying'};" +
+                "Hls.ErrorTypes={NETWORK_ERROR:'networkError',MEDIA_ERROR:'mediaError',OTHER_ERROR:'otherError'};" +
+                "Hls.ErrorDetails={};" +
+                "Hls.prototype.on=function(e,cb){(this.listeners[e]||(this.listeners[e]=[])).push(cb);return this;};" +
+                "Hls.prototype.once=function(e,cb){var self=this;var w=function(ev,d){self.off(e,w);cb(ev,d);};return this.on(e,w);};" +
+                "Hls.prototype.off=function(e,cb){var a=this.listeners[e]||[];this.listeners[e]=a.filter(function(x){return x!==cb;});return this;};" +
+                "Hls.prototype._emit=function(e,d){var a=(this.listeners[e]||[]).slice();for(var i=0;i<a.length;i++){try{a[i](e,d||{});}catch(x){}}};" +
+                "Hls.prototype.attachMedia=function(m){this.media=m;var s=this;setTimeout(function(){s._emit(Hls.Events.MEDIA_ATTACHED,{media:m});},0);};" +
+                "Hls.prototype.detachMedia=function(){this._emit(Hls.Events.MEDIA_DETACHING,{});this.media=null;this._emit(Hls.Events.MEDIA_DETACHED,{});};" +
+                "Hls.prototype.loadSource=function(u){this.url=String(u||'');try{if(window.RenegadeBridge)RenegadeBridge.onStream(this.url);}catch(e){}" +
+                "var s=this;setTimeout(function(){s._emit(Hls.Events.MANIFEST_LOADING,{url:s.url});s._emit(Hls.Events.MANIFEST_LOADED,{url:s.url,levels:[]});s._emit(Hls.Events.MANIFEST_PARSED,{levels:[]});},0);};" +
+                "Hls.prototype.startLoad=function(){};Hls.prototype.stopLoad=function(){};" +
+                "Hls.prototype.recoverMediaError=function(){};Hls.prototype.swapAudioCodec=function(){};" +
+                "Hls.prototype.destroy=function(){this._emit(Hls.Events.DESTROYING,{});this.listeners={};this.media=null;};" +
+                "window.Hls=Hls;" +
+                "})();";
+
+        return new WebResourceResponse(
+                "application/javascript",
+                "UTF-8",
+                new ByteArrayInputStream(js.getBytes()));
+    }
+
+    private boolean shouldProbeLegacyResource(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+        if (lower.startsWith("data:") || lower.startsWith("blob:")) return false;
+
+        return lower.contains("stream") ||
+                lower.contains("player") ||
+                lower.contains("source") ||
+                lower.contains("manifest") ||
+                lower.contains("playlist") ||
+                lower.contains("event") ||
+                lower.contains("api") ||
+                lower.endsWith(".js") ||
+                lower.contains(".js?");
+    }
+
+    private void probeLegacyResource(
+            String resourceUrl,
+            Map<String, String> requestHeaders) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL target = new URL(resourceUrl);
+                connection = (HttpURLConnection) target.openConnection();
+                connection.setInstanceFollowRedirects(true);
+                connection.setConnectTimeout(7000);
+                connection.setReadTimeout(7000);
+
+                if (currentUserAgent != null && !currentUserAgent.isEmpty()) {
+                    connection.setRequestProperty("User-Agent", currentUserAgent);
+                }
+                if (currentEventUrl != null) {
+                    connection.setRequestProperty("Referer", currentEventUrl);
+                }
+
+                String cookie = CookieManager.getInstance().getCookie(resourceUrl);
+                if (cookie != null && !cookie.isEmpty()) {
+                    connection.setRequestProperty("Cookie", cookie);
+                }
+
+                if (requestHeaders != null) {
+                    for (Map.Entry<String, String> entry : requestHeaders.entrySet()) {
+                        String key = entry.getKey();
+                        String value = entry.getValue();
+                        if (key == null || value == null) continue;
+                        if ("Host".equalsIgnoreCase(key) ||
+                                "Connection".equalsIgnoreCase(key) ||
+                                "Content-Length".equalsIgnoreCase(key)) continue;
+                        try {
+                            connection.setRequestProperty(key, value);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+
+                String contentType = connection.getContentType();
+                if (contentType != null) {
+                    String ct = contentType.toLowerCase(Locale.US);
+                    if (!(ct.contains("javascript") ||
+                            ct.contains("json") ||
+                            ct.contains("text") ||
+                            ct.contains("xml") ||
+                            ct.contains("mpegurl"))) {
+                        return;
+                    }
+                }
+
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(connection.getInputStream()));
+                StringBuilder body = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null &&
+                        body.length() < 1_500_000) {
+                    body.append(line).append('\n');
+                }
+                reader.close();
+
+                String candidate =
+                        findManifestInText(body.toString(), resourceUrl);
+                if (candidate != null) {
+                    considerLegacyMedia(
+                            candidate,
+                            requestHeaders == null ?
+                                    Collections.emptyMap() :
+                                    requestHeaders);
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "renegade-resource-probe").start();
     }
 
     private boolean isMediaManifest(String url) {
@@ -928,6 +1097,8 @@ public final class MainActivity extends Activity {
         nativePlayerView.setVisibility(View.GONE);
         playerWeb.stopLoading();
         playerWeb.loadUrl("about:blank");
+        playerWeb.pauseTimers();
+        playerWeb.onPause();
         playerShell.setVisibility(View.GONE);
         loading.setVisibility(View.GONE);
         currentEventUrl = null;
