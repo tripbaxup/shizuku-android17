@@ -1067,7 +1067,7 @@ public final class MainActivity extends Activity {
                 Log.e("RenegadeSports",
                         "Native player error: " +
                                 (error == null ? "unknown" :
-                                        error.errorCodeName + " " + error.getMessage()),
+                                        error.getErrorCodeName() + " " + error.getMessage()),
                         error);
                 handler.post(() -> {
                     nativePreparing = false;
