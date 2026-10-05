@@ -1,0 +1,964 @@
+package lat.gsports.player;
+
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
+import android.view.KeyEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.webkit.CookieManager;
+import android.webkit.JsResult;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.MimeTypes;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.ui.PlayerView;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class MainActivity extends Activity {
+    private static final String API_URL = "https://gsports.lat/?api";
+    private static final String HOME_URL = "https://gsports.lat/";
+
+    private static final int BG = Color.rgb(4, 8, 10);
+    private static final int SURFACE = Color.rgb(12, 18, 23);
+    private static final int SURFACE2 = Color.rgb(17, 25, 31);
+    private static final int TEXT = Color.rgb(243, 247, 245);
+    private static final int MUTED = Color.rgb(145, 158, 154);
+    private static final int EMERALD = Color.rgb(64, 240, 140);
+    private static final int BORDER = Color.rgb(30, 43, 48);
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+
+    private FrameLayout root;
+    private LinearLayout page;
+    private LinearLayout listBox;
+    private TextView status;
+    private TextView countText;
+    private WebView apiView;
+    private WebView homeView;
+    private WebView playerWeb;
+    private PlayerView nativePlayerView;
+    private ExoPlayer nativePlayer;
+    private FrameLayout playerShell;
+    private LinearLayout loading;
+    private TextView playerBack;
+
+    private JSONArray apiEvents;
+    private final Map<String, Meta> metaByUrl = new HashMap<>();
+    private Uri eventUri;
+    private String currentEventUrl;
+    private String currentUserAgent;
+    private volatile boolean nativePreparing;
+    private final Set<String> attemptedStreams =
+            Collections.synchronizedSet(new HashSet<>());
+    private OnBackInvokedCallback backCallback;
+    private boolean backRegistered;
+
+    private static final class Meta {
+        String time = "";
+        String channel = "";
+    }
+
+    @Override public void onCreate(Bundle state) {
+        super.onCreate(state);
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
+        getWindow().getDecorView().setSystemUiVisibility(0);
+
+        buildUi();
+        applyInsets();
+        configureApi();
+        configureHome();
+
+        apiView.loadUrl(API_URL);
+        homeView.loadUrl(HOME_URL);
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private TextView tv(String value, float sp, int color) {
+        TextView v = new TextView(this);
+        v.setText(value);
+        v.setTextSize(sp);
+        v.setTextColor(color);
+        v.setIncludeFontPadding(false);
+        return v;
+    }
+
+    private GradientDrawable bg(int color, int radius) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(radius));
+        return d;
+    }
+
+    private GradientDrawable border(int color, int radius, int strokeColor) {
+        GradientDrawable d = bg(color, radius);
+        d.setStroke(dp(1), strokeColor);
+        return d;
+    }
+
+    private GradientDrawable gradient(int start, int end, int radius) {
+        GradientDrawable d = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{start, end});
+        d.setCornerRadius(dp(radius));
+        return d;
+    }
+
+    private int accentFor(String league) {
+        String l = league == null ? "" : league.toUpperCase(Locale.US);
+        if ("NFL".equals(l)) return Color.rgb(121, 82, 255);
+        if ("NBA".equals(l)) return Color.rgb(41, 161, 255);
+        if ("MLB".equals(l)) return Color.rgb(255, 72, 96);
+        if ("NHL".equals(l)) return Color.rgb(192, 203, 213);
+        if ("UFC".equals(l) || "MMA".equals(l)) return Color.rgb(255, 84, 54);
+        return EMERALD;
+    }
+
+    private void buildUi() {
+        root = new FrameLayout(this);
+        root.setBackgroundColor(BG);
+        setContentView(root);
+
+        page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        root.addView(page, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        page.addView(header, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView logo = tv("R", 22, Color.rgb(3, 11, 8));
+        logo.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        logo.setGravity(Gravity.CENTER);
+        logo.setBackground(gradient(Color.rgb(86, 255, 157), Color.rgb(49, 203, 255), 16));
+        header.addView(logo, new LinearLayout.LayoutParams(dp(52), dp(52)));
+
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams brandLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        brandLp.leftMargin = dp(14);
+        header.addView(brand, brandLp);
+
+        TextView title = tv("Renegade Sports", 28, TEXT);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        brand.addView(title);
+
+        TextView subtitle = tv("LIVE EVENT HUB", 10, EMERALD);
+        subtitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        subtitle.setLetterSpacing(0.16f);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-2, -2);
+        subLp.topMargin = dp(5);
+        brand.addView(subtitle, subLp);
+
+        TextView refresh = tv("↻", 25, EMERALD);
+        refresh.setGravity(Gravity.CENTER);
+        refresh.setBackground(border(Color.rgb(9, 22, 17), 18, Color.rgb(31, 72, 52)));
+        header.addView(refresh, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        refresh.setOnClickListener(v -> {
+            status.setText("Refreshing live schedule…");
+            apiView.reload();
+            homeView.reload();
+        });
+
+        LinearLayout summary = new LinearLayout(this);
+        summary.setOrientation(LinearLayout.HORIZONTAL);
+        summary.setGravity(Gravity.CENTER_VERTICAL);
+        summary.setPadding(dp(14), dp(12), dp(14), dp(12));
+        summary.setBackground(border(Color.rgb(8, 18, 15), 16, Color.rgb(24, 53, 41)));
+        LinearLayout.LayoutParams summaryLp = new LinearLayout.LayoutParams(-1, -2);
+        summaryLp.topMargin = dp(18);
+        page.addView(summary, summaryLp);
+
+        summary.addView(tv("●", 12, EMERALD));
+        countText = tv("Loading events", 14, TEXT);
+        countText.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        LinearLayout.LayoutParams countLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        countLp.leftMargin = dp(8);
+        summary.addView(countText, countLp);
+
+        TextView live = tv("LIVE", 10, Color.rgb(3, 13, 8));
+        live.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        live.setGravity(Gravity.CENTER);
+        live.setPadding(dp(11), dp(6), dp(11), dp(6));
+        live.setBackground(bg(EMERALD, 20));
+        summary.addView(live);
+
+        status = tv("Syncing schedule and stream metadata…", 13, MUTED);
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(-1, -2);
+        statusLp.topMargin = dp(10);
+        page.addView(status, statusLp);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        listBox = new LinearLayout(this);
+        listBox.setOrientation(LinearLayout.VERTICAL);
+        listBox.setPadding(0, dp(14), 0, dp(24));
+        scroll.addView(listBox, new ScrollView.LayoutParams(-1, -2));
+        page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        apiView = hiddenWebView();
+        homeView = hiddenWebView();
+
+        playerShell = new FrameLayout(this);
+        playerShell.setBackgroundColor(Color.BLACK);
+        playerShell.setVisibility(View.GONE);
+        root.addView(playerShell, new FrameLayout.LayoutParams(-1, -1));
+
+        playerWeb = new WebView(this);
+        playerWeb.setBackgroundColor(Color.BLACK);
+        playerShell.addView(playerWeb, new FrameLayout.LayoutParams(-1, -1));
+
+        nativePlayerView = new PlayerView(this);
+        nativePlayerView.setBackgroundColor(Color.BLACK);
+        nativePlayerView.setVisibility(View.GONE);
+        playerShell.addView(nativePlayerView, new FrameLayout.LayoutParams(-1, -1));
+
+        loading = new LinearLayout(this);
+        loading.setOrientation(LinearLayout.VERTICAL);
+        loading.setGravity(Gravity.CENTER);
+        loading.setBackgroundColor(0xF0000000);
+
+        ProgressBar spinner = new ProgressBar(this);
+        loading.addView(spinner, new LinearLayout.LayoutParams(dp(52), dp(52)));
+
+        TextView loadingText = tv("Opening stream…", 16, Color.WHITE);
+        loadingText.setId(android.R.id.message);
+        LinearLayout.LayoutParams lt = new LinearLayout.LayoutParams(-2, -2);
+        lt.topMargin = dp(14);
+        loading.addView(loadingText, lt);
+        playerShell.addView(loading, new FrameLayout.LayoutParams(-1, -1));
+
+        playerBack = tv("‹  Home", 15, Color.WHITE);
+        playerBack.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        playerBack.setGravity(Gravity.CENTER);
+        playerBack.setPadding(dp(14), 0, dp(14), 0);
+        playerBack.setBackground(border(0xCC09100D, 18, Color.rgb(44, 65, 56)));
+        FrameLayout.LayoutParams backLp =
+                new FrameLayout.LayoutParams(-2, dp(44), Gravity.TOP | Gravity.START);
+        backLp.setMargins(dp(10), dp(10), 0, 0);
+        playerShell.addView(playerBack, backLp);
+        playerBack.setOnClickListener(v -> closePlayer());
+    }
+
+    private WebView hiddenWebView() {
+        WebView w = new WebView(this);
+        w.setVisibility(View.GONE);
+        root.addView(w, new FrameLayout.LayoutParams(1, 1));
+        return w;
+    }
+
+    private void applyInsets() {
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= 30) {
+                top = insets.getInsets(WindowInsets.Type.statusBars()).top;
+                bottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+
+            page.setPadding(dp(18), top + dp(14), dp(18), bottom + dp(8));
+
+            ViewGroup.LayoutParams params = playerBack.getLayoutParams();
+            if (params instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) params;
+                lp.topMargin = top + dp(8);
+                lp.leftMargin = dp(10);
+                playerBack.setLayoutParams(lp);
+            }
+            return insets;
+        });
+        root.requestApplyInsets();
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void configureApi() {
+        WebSettings s = apiView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setLoadsImagesAutomatically(false);
+        s.setSupportMultipleWindows(false);
+        s.setJavaScriptCanOpenWindowsAutomatically(false);
+
+        apiView.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onCreateWindow(
+                    WebView view, boolean dialog, boolean gesture,
+                    android.os.Message resultMsg) {
+                return false;
+            }
+        });
+
+        apiView.setWebViewClient(new WebViewClient() {
+            @Override public void onPageFinished(WebView view, String url) {
+                handler.postDelayed(MainActivity.this::readApi, 150);
+            }
+        });
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void configureHome() {
+        WebSettings s = homeView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setLoadsImagesAutomatically(false);
+        s.setSupportMultipleWindows(false);
+        s.setJavaScriptCanOpenWindowsAutomatically(false);
+
+        homeView.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onCreateWindow(
+                    WebView view, boolean dialog, boolean gesture,
+                    android.os.Message resultMsg) {
+                return false;
+            }
+        });
+
+        homeView.setWebViewClient(new WebViewClient() {
+            @Override public void onPageFinished(WebView view, String url) {
+                handler.postDelayed(MainActivity.this::scrapeScheduleMetadata, 450);
+            }
+        });
+    }
+
+    private void readApi() {
+        apiView.evaluateJavascript(
+                "(function(){return document.body?document.body.innerText:'';})()",
+                raw -> {
+                    try {
+                        String json = new JSONArray("[" + raw + "]").getString(0);
+                        apiEvents = new JSONObject(json).getJSONArray("events");
+                        renderEvents();
+                    } catch (Exception e) {
+                        status.setText("Could not load live events. Tap refresh to retry.");
+                    }
+                });
+    }
+
+    private void scrapeScheduleMetadata() {
+        String js =
+                "(function(){" +
+                "function norm(s){return (s||'').replace(/\\s+/g,' ').trim();}" +
+                "var networks=['NBA League Pass','NBA TV','NFL Network','MLB Network','ESPN2','ESPN','TNT','TBS','truTV','CBS','FOX','NBC','ABC','Prime Video'];" +
+                "var seen={};var out=[];" +
+                "document.querySelectorAll('a[href*=\"/event/\"]').forEach(function(a){" +
+                "var u=a.href||'';if(!u||seen[u])return;seen[u]=1;" +
+                "var c=a.closest('article,section,li,[class*=event],[class*=game],[class*=card]')||a.parentElement||a;" +
+                "var text=norm(c.innerText||a.innerText);" +
+                "var tm=text.match(/\\b(\\d{1,2}:\\d{2}\\s?(?:AM|PM))\\b/i);" +
+                "var channel='';for(var i=0;i<networks.length;i++){if(text.indexOf(networks[i])>=0){channel=networks[i];break;}}" +
+                "out.push({url:u,time:tm?tm[1].toUpperCase().replace(/\\s+/g,' '):'',channel:channel});" +
+                "});return JSON.stringify(out);})();";
+
+        homeView.evaluateJavascript(js, raw -> {
+            try {
+                String payload = new JSONArray("[" + raw + "]").getString(0);
+                JSONArray arr = new JSONArray(payload);
+                metaByUrl.clear();
+
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    Meta m = new Meta();
+                    m.time = o.optString("time", "");
+                    m.channel = o.optString("channel", "");
+                    String url = o.optString("url", "");
+                    if (!url.isEmpty()) metaByUrl.put(url, m);
+                }
+
+                if (apiEvents != null) renderEvents();
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void renderEvents() throws Exception {
+        if (apiEvents == null) return;
+
+        listBox.removeAllViews();
+        countText.setText(apiEvents.length() +
+                (apiEvents.length() == 1 ? " live event" : " live events"));
+
+        String lastLeague = "";
+
+        for (int i = 0; i < apiEvents.length(); i++) {
+            JSONObject item = apiEvents.getJSONObject(i);
+            String title = item.optString("title");
+            String league = item.optString("category", "Other").toUpperCase(Locale.US);
+            String url = item.optString("url");
+
+            if (title.isEmpty() || !url.startsWith("http")) continue;
+
+            Meta meta = metaByUrl.get(url);
+            String time = meta == null ? "" : meta.time;
+            String channel = meta == null ? "" : meta.channel;
+            int accent = accentFor(league);
+
+            if (!league.equals(lastLeague)) {
+                LinearLayout section = new LinearLayout(this);
+                section.setGravity(Gravity.CENTER_VERTICAL);
+                section.setPadding(dp(2), dp(14), dp(2), dp(10));
+
+                section.addView(tv("●", 12, accent));
+
+                TextView heading = tv(league, 13, TEXT);
+                heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                heading.setLetterSpacing(0.08f);
+                LinearLayout.LayoutParams h =
+                        new LinearLayout.LayoutParams(-2, -2);
+                h.leftMargin = dp(8);
+                section.addView(heading, h);
+
+                listBox.addView(section);
+                lastLeague = league;
+            }
+
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.HORIZONTAL);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setBackground(border(SURFACE, 20, BORDER));
+            card.setElevation(dp(2));
+
+            View accentBar = new View(this);
+            GradientDrawable barBg = new GradientDrawable();
+            barBg.setColor(accent);
+            float r = dp(20);
+            barBg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
+            accentBar.setBackground(barBg);
+            card.addView(accentBar, new LinearLayout.LayoutParams(dp(5), -1));
+
+            LinearLayout timeBox = new LinearLayout(this);
+            timeBox.setOrientation(LinearLayout.VERTICAL);
+            timeBox.setGravity(Gravity.CENTER_HORIZONTAL);
+            timeBox.setPadding(dp(12), dp(18), dp(8), dp(18));
+            card.addView(timeBox, new LinearLayout.LayoutParams(dp(104), -1));
+
+            TextView timeView = tv(time.isEmpty() ? "LIVE" : time,
+                    time.isEmpty() ? 13 : 17,
+                    time.isEmpty() ? accent : Color.rgb(185, 196, 201));
+            timeView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            timeView.setGravity(Gravity.CENTER);
+            timeBox.addView(timeView);
+
+            TextView leagueChip = tv(league, 11, Color.WHITE);
+            leagueChip.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            leagueChip.setGravity(Gravity.CENTER);
+            leagueChip.setPadding(dp(12), dp(7), dp(12), dp(7));
+            leagueChip.setBackground(bg(accent, 12));
+            LinearLayout.LayoutParams chip =
+                    new LinearLayout.LayoutParams(-2, -2);
+            chip.topMargin = dp(11);
+            timeBox.addView(leagueChip, chip);
+
+            LinearLayout body = new LinearLayout(this);
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setGravity(Gravity.CENTER_VERTICAL);
+            body.setPadding(dp(8), dp(18), dp(6), dp(18));
+            card.addView(body, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            TextView game = tv(title, 18, TEXT);
+            game.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            game.setLineSpacing(0, 1.04f);
+            body.addView(game);
+
+            if (!channel.isEmpty()) {
+                TextView channelPill = tv(channel, 12, Color.rgb(180, 193, 199));
+                channelPill.setPadding(dp(10), dp(6), dp(10), dp(6));
+                channelPill.setBackground(border(SURFACE2, 10, Color.rgb(40, 52, 59)));
+                LinearLayout.LayoutParams ch =
+                        new LinearLayout.LayoutParams(-2, -2);
+                ch.topMargin = dp(12);
+                body.addView(channelPill, ch);
+            }
+
+            TextView arrow = tv("›", 26, Color.rgb(92, 111, 116));
+            arrow.setGravity(Gravity.CENTER);
+            arrow.setPadding(dp(4), 0, dp(12), 0);
+            card.addView(arrow, new LinearLayout.LayoutParams(dp(40), -1));
+
+            LinearLayout.LayoutParams cardLp =
+                    new LinearLayout.LayoutParams(-1, dp(128));
+            cardLp.setMargins(0, 0, 0, dp(12));
+            listBox.addView(card, cardLp);
+
+            card.setOnClickListener(v -> openPlayer(title, url));
+        }
+
+        status.setText("Schedule synced • tap any event to watch");
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void openPlayer(String title, String url) {
+        eventUri = Uri.parse(url);
+        currentEventUrl = url;
+        attemptedStreams.clear();
+        nativePreparing = false;
+        releaseNativePlayer();
+        registerBackHandler();
+
+        playerShell.setVisibility(View.VISIBLE);
+        nativePlayerView.setVisibility(View.GONE);
+        playerWeb.setVisibility(Build.VERSION.SDK_INT <= 27 ? View.INVISIBLE : View.VISIBLE);
+        loading.setVisibility(View.VISIBLE);
+        ((TextView) loading.findViewById(android.R.id.message))
+                .setText("Opening “" + title + "”…");
+
+        WebSettings s = playerWeb.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setDatabaseEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setSupportMultipleWindows(false);
+        s.setJavaScriptCanOpenWindowsAutomatically(false);
+        s.setUseWideViewPort(true);
+        s.setLoadWithOverviewMode(true);
+        s.setBuiltInZoomControls(false);
+        s.setDisplayZoomControls(false);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        currentUserAgent = s.getUserAgentString();
+
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        cookies.setAcceptThirdPartyCookies(playerWeb, true);
+
+        playerWeb.setDownloadListener((u, ua, cd, mt, len) -> {});
+
+        playerWeb.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onCreateWindow(
+                    WebView view, boolean dialog, boolean gesture,
+                    android.os.Message resultMsg) {
+                return false;
+            }
+
+            @Override public boolean onJsAlert(
+                    WebView view, String url, String message, JsResult result) {
+                result.cancel();
+                return true;
+            }
+
+            @Override public boolean onJsConfirm(
+                    WebView view, String url, String message, JsResult result) {
+                result.cancel();
+                return true;
+            }
+        });
+
+        playerWeb.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(
+                    WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri == null) return true;
+                if (!request.isForMainFrame()) return false;
+                return !allowedMainFrame(uri);
+            }
+
+            @Override public WebResourceResponse shouldInterceptRequest(
+                    WebView view, WebResourceRequest request) {
+                if (Build.VERSION.SDK_INT <= 27 && request != null &&
+                        request.getUrl() != null) {
+                    considerLegacyMedia(
+                            request.getUrl().toString(),
+                            request.getRequestHeaders());
+                }
+                return super.shouldInterceptRequest(view, request);
+            }
+
+            @Override public void onPageFinished(WebView view, String loadedUrl) {
+                if (loadedUrl == null || !loadedUrl.startsWith("http")) return;
+
+                if (Build.VERSION.SDK_INT <= 27) {
+                    scanLegacyPage();
+                    handler.postDelayed(MainActivity.this::scanLegacyPage, 1200);
+                    handler.postDelayed(() -> {
+                        if (!nativePreparing &&
+                                playerShell.getVisibility() == View.VISIBLE) {
+                            ((TextView) loading.findViewById(android.R.id.message))
+                                    .setText("Locating Android 8.1 stream…");
+                        }
+                    }, 4500);
+                    return;
+                }
+
+                lockToPlayer();
+
+                handler.postDelayed(() -> {
+                    if (playerShell.getVisibility() == View.VISIBLE) {
+                        loading.setVisibility(View.GONE);
+                        startSitePlayer();
+                    }
+                }, 350);
+            }
+        });
+
+        playerWeb.stopLoading();
+        playerWeb.clearHistory();
+        playerWeb.loadUrl(url);
+
+        if (Build.VERSION.SDK_INT <= 27) {
+            resolveLegacyHtml(url);
+        }
+    }
+
+    private boolean isMediaManifest(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+        return lower.contains(".m3u8") || lower.contains(".mpd");
+    }
+
+    private void considerLegacyMedia(String url, Map<String, String> requestHeaders) {
+        if (Build.VERSION.SDK_INT > 27 || !isMediaManifest(url)) return;
+
+        String clean = url.replace("\\/", "/");
+        synchronized (attemptedStreams) {
+            if (attemptedStreams.contains(clean)) return;
+            attemptedStreams.add(clean);
+        }
+
+        Map<String, String> copy = new HashMap<>();
+        if (requestHeaders != null) copy.putAll(requestHeaders);
+
+        runOnUiThread(() -> startNativeStream(clean, copy));
+    }
+
+    private void resolveLegacyHtml(String eventUrl) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL target = new URL(eventUrl);
+                connection = (HttpURLConnection) target.openConnection();
+                connection.setInstanceFollowRedirects(true);
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(10000);
+                connection.setRequestProperty("User-Agent",
+                        currentUserAgent == null ?
+                                "Mozilla/5.0 (Linux; Android 8.1) AppleWebKit/537.36 Chrome/67 Mobile Safari/537.36" :
+                                currentUserAgent);
+                connection.setRequestProperty("Accept",
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+                connection.setRequestProperty("Referer", HOME_URL);
+
+                String cookie = CookieManager.getInstance().getCookie(eventUrl);
+                if (cookie != null && !cookie.isEmpty()) {
+                    connection.setRequestProperty("Cookie", cookie);
+                }
+
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(connection.getInputStream()));
+                StringBuilder html = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null &&
+                        html.length() < 2_000_000) {
+                    html.append(line).append('\n');
+                }
+                reader.close();
+
+                String candidate = findManifestInText(html.toString(), eventUrl);
+                if (candidate != null) {
+                    considerLegacyMedia(candidate, Collections.emptyMap());
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "renegade-legacy-resolver").start();
+    }
+
+    private String findManifestInText(String raw, String baseUrl) {
+        if (raw == null) return null;
+
+        String text = raw
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+                .replace("\\u003d", "=")
+                .replace("&amp;", "&");
+
+        Pattern absolute = Pattern.compile(
+                "https?://[^\\\"'<>\\s]+?\\.(?:m3u8|mpd)(?:\\?[^\\\"'<>\\s]*)?",
+                Pattern.CASE_INSENSITIVE);
+        Matcher m = absolute.matcher(text);
+        if (m.find()) return m.group();
+
+        Pattern relative = Pattern.compile(
+                "[\\\"']([^\\\"']+\\.(?:m3u8|mpd)(?:\\?[^\\\"']*)?)[\\\"']",
+                Pattern.CASE_INSENSITIVE);
+        Matcher r = relative.matcher(text);
+        if (r.find()) {
+            try {
+                return new URL(new URL(baseUrl), r.group(1)).toString();
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    private void scanLegacyPage() {
+        if (Build.VERSION.SDK_INT > 27 ||
+                playerShell.getVisibility() != View.VISIBLE) return;
+
+        String js =
+                "(function(){" +
+                "var a=[];" +
+                "try{var e=(performance&&performance.getEntriesByType)?performance.getEntriesByType('resource'):[];" +
+                "for(var i=0;i<e.length;i++){var n=e[i].name||'';if(/\\.(m3u8|mpd)(\\?|$)/i.test(n))a.push(n);}}catch(x){}" +
+                "try{var h=document.documentElement?document.documentElement.innerHTML:'';" +
+                "var m=h.match(/https?:[^\\\"'<>\\s]+\\.(?:m3u8|mpd)(?:\\?[^\\\"'<>\\s]*)?/ig);" +
+                "if(m){for(var j=0;j<m.length;j++)a.push(m[j]);}}catch(x){}" +
+                "return JSON.stringify(a);" +
+                "})()";
+
+        playerWeb.evaluateJavascript(js, raw -> {
+            try {
+                String payload = new JSONArray("[" + raw + "]").getString(0);
+                JSONArray arr = new JSONArray(payload);
+                for (int i = 0; i < arr.length(); i++) {
+                    considerLegacyMedia(arr.optString(i), Collections.emptyMap());
+                }
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void startNativeStream(String streamUrl, Map<String, String> captured) {
+        if (Build.VERSION.SDK_INT > 27 ||
+                playerShell.getVisibility() != View.VISIBLE) return;
+
+        nativePreparing = true;
+        releaseNativePlayer();
+
+        Map<String, String> headers = new HashMap<>();
+        if (currentUserAgent != null && !currentUserAgent.isEmpty()) {
+            headers.put("User-Agent", currentUserAgent);
+        }
+        if (currentEventUrl != null) headers.put("Referer", currentEventUrl);
+        headers.put("Accept", "*/*");
+
+        String cookie = CookieManager.getInstance().getCookie(streamUrl);
+        if (cookie != null && !cookie.isEmpty()) headers.put("Cookie", cookie);
+
+        if (captured != null) {
+            copyHeader(captured, headers, "Origin");
+            copyHeader(captured, headers, "Referer");
+            copyHeader(captured, headers, "User-Agent");
+            copyHeader(captured, headers, "Cookie");
+        }
+
+        DefaultHttpDataSource.Factory http =
+                new DefaultHttpDataSource.Factory()
+                        .setAllowCrossProtocolRedirects(true)
+                        .setDefaultRequestProperties(headers);
+        DefaultDataSource.Factory data =
+                new DefaultDataSource.Factory(this, http);
+
+        nativePlayer = new ExoPlayer.Builder(this)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(data))
+                .build();
+
+        nativePlayerView.setPlayer(nativePlayer);
+        nativePlayerView.setVisibility(View.VISIBLE);
+        playerWeb.setVisibility(View.INVISIBLE);
+        loading.setVisibility(View.VISIBLE);
+        ((TextView) loading.findViewById(android.R.id.message))
+                .setText("Starting Android 8.1 native player…");
+
+        String lower = streamUrl.toLowerCase(Locale.US);
+        MediaItem item = new MediaItem.Builder()
+                .setUri(streamUrl)
+                .setMimeType(lower.contains(".mpd") ?
+                        MimeTypes.APPLICATION_MPD :
+                        MimeTypes.APPLICATION_M3U8)
+                .build();
+
+        nativePlayer.setMediaItem(item);
+        nativePlayer.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_READY) {
+                    nativePreparing = false;
+                    loading.setVisibility(View.GONE);
+                    playerWeb.stopLoading();
+                    nativePlayer.play();
+                }
+            }
+
+            @Override public void onPlayerError(PlaybackException error) {
+                handler.post(() -> {
+                    nativePreparing = false;
+                    releaseNativePlayer();
+                    nativePlayerView.setVisibility(View.GONE);
+                    loading.setVisibility(View.VISIBLE);
+                    ((TextView) loading.findViewById(android.R.id.message))
+                            .setText("Trying another Android 8.1 stream source…");
+                    scanLegacyPage();
+                });
+            }
+        });
+
+        nativePlayer.prepare();
+        nativePlayer.play();
+    }
+
+    private void copyHeader(
+            Map<String, String> from,
+            Map<String, String> to,
+            String wanted) {
+        for (Map.Entry<String, String> entry : from.entrySet()) {
+            if (wanted.equalsIgnoreCase(entry.getKey()) &&
+                    entry.getValue() != null) {
+                to.put(wanted, entry.getValue());
+                return;
+            }
+        }
+    }
+
+    private void releaseNativePlayer() {
+        if (nativePlayer != null) {
+            nativePlayer.release();
+            nativePlayer = null;
+        }
+        if (nativePlayerView != null) nativePlayerView.setPlayer(null);
+    }
+
+    private boolean allowedMainFrame(Uri uri) {
+        if (eventUri == null || uri == null) return false;
+
+        String scheme = uri.getScheme();
+        if (!"https".equalsIgnoreCase(scheme) &&
+                !"http".equalsIgnoreCase(scheme)) return false;
+
+        String host = uri.getHost();
+        if (host == null || !host.equalsIgnoreCase(eventUri.getHost()))
+            return false;
+
+        String path = uri.getPath();
+        String eventPath = eventUri.getPath();
+        return path != null && eventPath != null && path.equals(eventPath);
+    }
+
+    private void lockToPlayer() {
+        String js =
+                "(function(){" +
+                "var p=document.querySelector('#player');if(!p)return;" +
+                "var st=document.getElementById('__rs_lock');" +
+                "if(!st){st=document.createElement('style');st.id='__rs_lock';" +
+                "st.textContent='html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;background:#000!important;overflow:hidden!important}body>*:not(#player){display:none!important}#player{display:block!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;z-index:2147483646!important;background:#000!important}';document.head.appendChild(st);}" +
+                "})();";
+        playerWeb.evaluateJavascript(js, null);
+    }
+
+    private void startSitePlayer() {
+        String js =
+                "(function(){" +
+                "var v=document.querySelector('video');" +
+                "if(v&&v.paused){try{var q=v.play();if(q&&q.catch)q.catch(function(){});}catch(e){}}" +
+                "var b=document.querySelector('[data-playstop].stopped,[data-play].paused,.play-wrapper');" +
+                "if((!v||v.paused)&&b){try{b.click();}catch(e){}}" +
+                "})();";
+        playerWeb.evaluateJavascript(js, null);
+    }
+
+    private void registerBackHandler() {
+        if (Build.VERSION.SDK_INT >= 33 && !backRegistered) {
+            backCallback = this::closePlayer;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+            backRegistered = true;
+        }
+    }
+
+    private void unregisterBackHandler() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+                backRegistered && backCallback != null) {
+            getOnBackInvokedDispatcher()
+                    .unregisterOnBackInvokedCallback(backCallback);
+            backRegistered = false;
+            backCallback = null;
+        }
+    }
+
+    private void closePlayer() {
+        unregisterBackHandler();
+        nativePreparing = false;
+        releaseNativePlayer();
+        nativePlayerView.setVisibility(View.GONE);
+        playerWeb.stopLoading();
+        playerWeb.loadUrl("about:blank");
+        playerShell.setVisibility(View.GONE);
+        loading.setVisibility(View.GONE);
+        currentEventUrl = null;
+        eventUri = null;
+    }
+
+    @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BACK &&
+                playerShell.getVisibility() == View.VISIBLE) {
+            closePlayer();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override public void onBackPressed() {
+        if (playerShell.getVisibility() == View.VISIBLE) closePlayer();
+        else super.onBackPressed();
+    }
+
+    @Override protected void onStop() {
+        super.onStop();
+        if (nativePlayer != null) nativePlayer.pause();
+    }
+
+    @Override protected void onDestroy() {
+        unregisterBackHandler();
+        releaseNativePlayer();
+        if (apiView != null) apiView.destroy();
+        if (homeView != null) homeView.destroy();
+        if (playerWeb != null) playerWeb.destroy();
+        super.onDestroy();
+    }
+}
